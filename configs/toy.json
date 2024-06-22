@@ -1,0 +1,18 @@
+{
+    "d_model": 512,
+    "nhead": 8,
+    "max_len": 10,
+    "encoder_layers": 2,
+    "decoder_layers": 2,
+
+    "lr": 3e-4,
+    "epochs": 10,
+    "bsz": 1,
+    "checkpoint_at": 5,
+    "eval_at": 1,
+
+    "num_particles": 5,
+    "threshold": 2,
+    "temperature": 1,
+    "eval_samples": 3
+}

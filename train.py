@@ -1,0 +1,289 @@
+import time
+import json
+import logging
+import argparse
+
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from torch.optim import AdamW
+from transformers import BertTokenizer
+
+from model import Evolver, Transformer
+
+from data import (
+    elaborate,
+    pad_traj_input_ids,
+    pad_traj_edit_tgts,
+    TrainLoader,
+    EvalLoader
+)
+
+from run import sample_trajectory
+from constants import PAD_TOKEN_ID
+
+logging.basicConfig()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+def plot_edit_loss(op_losses, tok_losses, idx_losses, prefix='test'):
+    fig, ax = plt.subplots()
+    ax.plot(op_losses, color='red', label='op loss')
+    ax.plot(tok_losses, color='blue', label='tok loss')
+    ax.plot(idx_losses, color='green', label='idx loss')
+    
+    # the sum of the xents aren't really useful
+    # ax.plot([sum(x) for x in zip(op_losses, tok_losses, idx_losses)], color='black', label='total')
+    
+    ax.set_xlabel('training step')
+    ax.set_ylabel('per-token xent')
+    ax.legend({'op loss': 'red', 'tok loss': 'blue', 'idx loss': 'green'})
+    
+    plt.tight_layout()
+    plt.savefig(f'figures/{prefix}-loss.png')
+    plt.close(fig)
+    
+def plot_eval_loss(eval_losses, prefix='test'):
+    fig, ax = plt.subplots()
+    ax.plot(eval_losses)
+    ax.set_xlabel('epoch')
+    ax.set_ylabel('per-token approximate ELBO')
+    
+    plt.tight_layout()
+    plt.savefig(f'figures/{prefix}-eval-loss.png')
+    plt.close(fig)
+    
+def plot_loss(losses, prefix):
+    plt.plot(losses)
+    plt.xlabel('training step')
+    plt.ylabel('per-token xent')
+    plt.tight_layout()
+    plt.savefig(f'figures/{prefix}-baseline-loss.png')
+   
+def log_edits(traj_edit_tgts):
+    logger.debug(
+        '\n' + 
+        '\n'.join(
+            ' '.join([e.ljust(8) for e in edit_tgts])
+            for edit_tgts in elaborate(traj_edit_tgts)
+        )
+    )
+    
+def sample_batch(
+    evolver, batch_ids,
+    num_particles, threshold, temperature,
+    device
+):
+    traj_input_ids = []
+    traj_edit_tgts = tuple([] for _ in range(3))
+    T = max(input_ids.shape[0] for input_ids in batch_ids)
+    
+    for input_ids in batch_ids:
+        cur_tgts, _ = sample_trajectory(
+            evolver, input_ids,
+            num_particles, threshold, temperature,
+            device
+        )
+
+        log_edits(cur_tgts)
+        input_ids = pad_traj_input_ids(input_ids, T)
+        cur_tgts = pad_traj_edit_tgts(cur_tgts, T-1)
+        
+        traj_input_ids.append(input_ids)
+        for i in range(3): traj_edit_tgts[i].append(cur_tgts[i])
+    
+    traj_input_ids = torch.stack(traj_input_ids).to(device)
+    traj_edit_tgts = tuple(map(lambda x: torch.stack(x).to(device), traj_edit_tgts))
+    
+    return traj_input_ids, traj_edit_tgts
+
+def train_evolver(
+    evolver, optim, train_loader, eval_loader,
+    epochs, grad_accum_steps, checkpoint_at, eval_at,
+    num_particles, threshold, temperature,
+    device, prefix
+):
+    op_losses = []
+    tok_losses = []
+    idx_losses = []
+    eval_losses = []
+    
+    for epoch in range(epochs):
+        logger.info(f'starting epoch: {epoch + 1}')
+       
+        s = time.time() 
+        for i, batch_ids in enumerate(train_loader):
+            
+            # E-step
+            evolver.eval() 
+            traj_input_ids, traj_edit_tgts = \
+                sample_batch(evolver, batch_ids, num_particles, threshold, temperature, device)
+          
+            # M-step
+            evolver.train()
+            traj_loss, op_loss, tok_loss, idx_loss = \
+                evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+            
+            if i % grad_accum_steps == 0:
+                optim.zero_grad()
+                traj_loss.backward()
+                optim.step()
+            
+            logger.info(f'loss: {op_loss + tok_loss + idx_loss}')
+            op_losses.append(op_loss.cpu().item())
+            tok_losses.append(tok_loss.cpu().item())
+            idx_losses.append(idx_loss.cpu().item())
+            logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
+            
+            plot_edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
+        
+        logger.info(f'completed epoch in {(time.time() - s):.3f} seconds')
+        
+        if (epoch + 1) % checkpoint_at == 0:
+            torch.save(evolver.state_dict(), f'checkpoints/{prefix}-model-{epoch+1}')
+            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-{epoch+1}')
+            
+        if (epoch + 1) % eval_at == 0:
+            s = time.time()
+            avg_eval_loss = evaluate_evolver(evolver, eval_loader, device)
+            logger.info(f'completed eval in {(time.time() - s):.3f} seconds')
+            eval_losses.extend(avg_eval_loss for _ in range(eval_at))
+            logger.info(f'eval loss: {eval_losses[-1]}')
+            plot_eval_loss(eval_losses, prefix=prefix)
+            
+def evaluate_evolver(evolver, eval_loader, device):
+    evolver.eval()
+    cur_eval_losses = []
+    
+    for traj_input_ids, log_posterior in eval_loader:
+        traj, log_likelihood = sample_trajectory(
+            evolver, traj_input_ids,
+            num_particles=1, threshold=0, temperature=1,
+            device=device
+        )
+        
+        log_edits(traj)
+        num_toks = torch.sum(traj_input_ids[-1] != PAD_TOKEN_ID)
+        cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
+            
+    return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
+
+def train_ar(
+    model, optim, train_loader,
+    epochs, checkpoint_at, eval_at,
+    prefix, **_
+):
+    model.train()
+    losses = []
+    
+    for epoch in range(epochs):
+        for traj_input_ids in train_loader:
+            traj_input_ids = torch.stack(traj_input_ids)
+            loss = model.step(optim, traj_input_ids)
+            
+            losses.append(loss.cpu().item())
+            logger.info(f'loss: {loss}')
+            
+            plot_loss(losses, prefix)
+            
+        if (epoch + 1) % checkpoint_at == 0:
+            logger.info('checkpointing...')
+            torch.save(model.state_dict(), f'checkpoints/{prefix}-model-baseline-{epoch+1}')
+            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-baseline-{epoch+1}')
+            
+        if (epoch + 1) % eval_at == 0:
+            logger.info('eval...')
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train')
+    parser.add_argument('--eval')
+    parser.add_argument('--config')
+    parser.add_argument('--prefix')
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--log-level', default='INFO')
+    return parser.parse_args()
+    
+def main():
+    args = parse_args()
+    logger.setLevel(getattr(logging, args.log_level))
+    
+    with open(args.config, 'r') as f:
+        config = json.load(f)
+        
+    tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+        
+    evolver = Evolver(
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        max_len=config['max_len'],
+        encoder_layers=config['encoder_layers'],
+        decoder_layers=config['decoder_layers'],
+        device=args.device
+    ).to(args.device)
+    
+    optim = AdamW(evolver.parameters(), lr=config['lr'])
+    
+    train_loader = TrainLoader.from_disk(
+        path=args.train,
+        bsz=config['bsz'],
+        max_len=config['max_len'],
+        tokenizer=tokenizer
+    ).to(args.device)
+    
+    eval_loader = EvalLoader.from_disk(
+        path=args.eval,
+        num_samples=config['eval_samples'],
+        max_len=config['max_len'],
+        tokenizer=tokenizer
+    ).to(args.device)
+    
+    train_evolver(
+        evolver, optim, train_loader, eval_loader,
+        epochs=config['epochs'],
+        grad_accum_steps=config['grad_accum_steps'],
+        checkpoint_at=config['checkpoint_at'],
+        eval_at=config['eval_at'],
+        num_particles=config['num_particles'],
+        threshold=config['threshold'],
+        temperature=config['temperature'],
+        device=args.device,
+        prefix=args.prefix
+    )
+
+if __name__ == '__main__':
+    main()
+            
+### deprecated
+
+def train_forced(
+    evolver, optim, train_loader,
+    epochs, checkpoint_at, eval_at, prefix
+):
+    evolver.train()
+
+    op_losses = []
+    tok_losses = []
+    idx_losses = []
+    
+    for epoch in range(epochs):
+        logger.info(f'starting epoch: {epoch + 1}') 
+        
+        for batch in train_loader:
+            op_loss, tok_loss, idx_loss = evolver.step(optim, *batch)
+
+            logger.info(f'loss: {-(op_loss + tok_loss + idx_loss)}')
+            op_losses.append(-op_loss.cpu().item())
+            tok_losses.append(-tok_loss.cpu().item())
+            idx_losses.append(-idx_loss.cpu().item())
+            logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
+            
+            plt.edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
+        
+        if (epoch + 1) % checkpoint_at == 0:
+            logger.info('checkpointing...')
+            torch.save(evolver.state_dict(), f'checkpoints/{prefix}-model-{epoch+1}')
+            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-{epoch+1}')
+            
+        if (epoch + 1) % eval_at == 0:
+            pass

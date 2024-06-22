@@ -10,7 +10,7 @@ from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
 
-from noise import noise_forward
+from dep import noise_forward
 
 from constants import (
     PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID, VOCAB_SIZE,
@@ -275,7 +275,7 @@ class EvolverDataset(Dataset):
         force_targets=False, name=None,
     ):
         tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
-        aligner = SentenceAligner(model='bert', token_type='bpe', matching_methods='m')
+        aligner = None # SentenceAligner(model='bert', token_type='bpe', matching_methods='m')
         
         self.traj_input_ids = [
             get_input_ids(t, max_len, tokenizer)

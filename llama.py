@@ -1,23 +1,8 @@
 import json
-import random
-import pickle
 
-
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    Trainer,
-    TrainingArguments,
-    DataCollatorForLanguageModeling
-)
-
+from transformers import AutoTokenizer
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
-from datasets import Dataset, DatasetDict
 from sklearn.model_selection import train_test_split
-
-path = '../data/noise_ft.jsonl'
-# model = LlamaForCausalLM.from_pretrained(model)
-# tokenizer = LlamaTokenizer.from_pretrained(model)
 
 def create_dataset(path, ds, system, out=None):
     examples = []

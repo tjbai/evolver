@@ -13,7 +13,7 @@ from data import (
     pad_traj_input_ids,
 )
 
-from noise import noise_forward
+from dep import noise_forward
 
 from constants import (
     PAD_TOKEN_ID, EOS_TOKEN_ID,

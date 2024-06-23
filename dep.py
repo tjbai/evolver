@@ -1,14 +1,13 @@
 import json
 import random
 import argparse
-from copy import deepcopy
-from functools import lru_cache
 from collections import defaultdict
 
 import conllu
 import numpy as np
 from tqdm import tqdm
 from ordered_set import OrderedSet
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 
 def flip(w):
     return random.choices([True, False], weights=[w, 1-w])[0]
@@ -50,10 +49,10 @@ def noise(observed, w):
             children[parent[node]].remove(node)
             if not children[parent[node]]: leaves.add(parent[node])
             
-        seq = ' '.join(to_text[s] for s in sent)
-        if seq and seq != traj[-1]: traj.append(seq)
+        seq = [to_text[s] for s in sent]
+        if seq and ' '.join(seq) != ' '.join(traj[-1]): traj.append(seq)
 
-    return traj[::-1], log_prob
+    return [''] + traj[::-1], log_prob
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -68,12 +67,15 @@ def main():
     
     with open(args.input, 'r') as f:
         sentences = conllu.parse(f.read())
-       
+      
+    detok = TreebankWordDetokenizer() 
     traj_list = []
     length = []
-    for sent in sentences:
+    for sent in tqdm(sentences):
         for _ in range(args.redundant):
-            traj_list.append(noise(sent, args.weight)[0])
+            traj = noise(sent, args.weight)[0]
+            traj = list(map(detok.detokenize, traj))
+            traj_list.append(traj)
             length.append(len(traj_list[-1]))
             
     print(f'generated {len(traj_list)} noising trajectories')

@@ -13,13 +13,11 @@ from model import Evolver, Transformer
 
 from data import (
     elaborate,
-    pad_traj_input_ids,
-    pad_traj_edit_tgts,
     TrainLoader,
     EvalLoader
 )
 
-from run import sample_trajectory
+from run import sample_trajectory, sample_batch
 from constants import PAD_TOKEN_ID
 
 logging.basicConfig()
@@ -69,34 +67,6 @@ def log_edits(traj_edit_tgts):
         )
     )
     
-def sample_batch(
-    evolver, batch_ids,
-    num_particles, threshold, temperature,
-    device
-):
-    traj_input_ids = []
-    traj_edit_tgts = tuple([] for _ in range(3))
-    T = max(input_ids.shape[0] for input_ids in batch_ids)
-    
-    for input_ids in batch_ids:
-        cur_tgts, _ = sample_trajectory(
-            evolver, input_ids,
-            num_particles, threshold, temperature,
-            device
-        )
-
-        log_edits(cur_tgts)
-        input_ids = pad_traj_input_ids(input_ids, T)
-        cur_tgts = pad_traj_edit_tgts(cur_tgts, T-1)
-        
-        traj_input_ids.append(input_ids)
-        for i in range(3): traj_edit_tgts[i].append(cur_tgts[i])
-    
-    traj_input_ids = torch.stack(traj_input_ids).to(device)
-    traj_edit_tgts = tuple(map(lambda x: torch.stack(x).to(device), traj_edit_tgts))
-    
-    return traj_input_ids, traj_edit_tgts
-
 def train_evolver(
     evolver, optim, train_loader, eval_loader,
     epochs, grad_accum_steps, checkpoint_at, eval_at,
@@ -211,7 +181,7 @@ def main():
     with open(args.config, 'r') as f:
         config = json.load(f)
         
-    tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         
     evolver = Evolver(
         d_model=config['d_model'],

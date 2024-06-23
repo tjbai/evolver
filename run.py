@@ -11,9 +11,10 @@ from data import (
     get_edit_tgts,
     get_input_ids,
     pad_traj_input_ids,
+    pad_traj_edit_tgts
 )
 
-from dep import noise_forward
+from dep import noise
 
 from constants import (
     PAD_TOKEN_ID, EOS_TOKEN_ID,
@@ -24,6 +25,33 @@ from constants import (
 logging.basicConfig()
 logger = logging.getLogger('train')
 logger.setLevel(logging.DEBUG if ('DEBUG' in os.environ) else logging.INFO)
+
+def sample_batch(
+    evolver, batch_ids,
+    num_particles, threshold, temperature,
+    device
+):
+    traj_input_ids = []
+    traj_edit_tgts = tuple([] for _ in range(3))
+    T = max(input_ids.shape[0] for input_ids in batch_ids)
+    
+    for input_ids in batch_ids:
+        cur_tgts, _ = sample_trajectory(
+            evolver, input_ids,
+            num_particles, threshold, temperature,
+            device
+        )
+
+        input_ids = pad_traj_input_ids(input_ids, T)
+        cur_tgts = pad_traj_edit_tgts(cur_tgts, T-1)
+        
+        traj_input_ids.append(input_ids)
+        for i in range(3): traj_edit_tgts[i].append(cur_tgts[i])
+    
+    traj_input_ids = torch.stack(traj_input_ids).to(device)
+    traj_edit_tgts = tuple(map(lambda x: torch.stack(x).to(device), traj_edit_tgts))
+    
+    return traj_input_ids, traj_edit_tgts
 
 def sample_trajectory(
     evolver, traj_input_ids,
@@ -40,8 +68,7 @@ def sample_trajectory(
     
     for i in range(T-1):
         edit_tgts, src, log_prob = particle_filter(
-            evolver,
-            traj_input_ids[i], traj_input_ids[i+1],
+            evolver, traj_input_ids[i], traj_input_ids[i+1],
             src, traj_pad_mask[i], traj_pad_mask[i+1],
             num_particles, threshold, temperature,
             device
@@ -66,7 +93,7 @@ def particle_filter(
     tgt_pad_mask = tgt_pad_mask.repeat(M, 1)
     
     # initialize particles and weights 
-    weights = torch.ones(M).to(device) / M
+    weights = torch.zeros(M).to(device)
     _ens = get_edit_tgts([INS_BOS], evolver.max_len)
     ens = tuple(map(lambda x: x.unsqueeze(0).repeat(M, 1, 1).to(device), _ens))
     ens_ops, ens_toks, ens_idxs = ens
@@ -77,7 +104,6 @@ def particle_filter(
     cache = None
     memory = None
     for i, forced in enumerate(output_ids[1:], start=1):
-        
         # forward pass 
         edit_logits, tgt, memory, cache = evolver.forward(
             input_ids, src,
@@ -91,26 +117,24 @@ def particle_filter(
         
         # handle EOS
         if forced == EOS_TOKEN_ID:
-            eos = torch.exp(op_probs[:, -1, EOS_ID])
+            eos = op_probs[:, -1, EOS_ID]
             ens_ops[:, i, :] = F.one_hot(torch.tensor(EOS_ID), 5).repeat(M, 1)
             ens_toks[:, i, :] = F.one_hot(torch.tensor(PAD_TOKEN_ID), VOCAB_SIZE).repeat(M, 1)
             ens_idxs[:, i, :] = F.one_hot(torch.tensor(0), evolver.max_len).repeat(M, 1)
-            weights *= eos
-            if M > 1: weights /= torch.sum(weights)
+            weights += eos
+            if M > 1: weights -= torch.logsumexp(weights, dim=0)
             break
     
         # compute proposal weights
         ins = op_probs[:, -1, INS_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1)
         cpy = op_probs[:, -1, CPY_ID].unsqueeze(1) + idx_probs[:, -1, input_ids.eq(forced)]
         sub = op_probs[:, -1, SUB_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1) + idx_probs[:, -1, :]
-       
+        
         # normalize proposal and sample
         logits = torch.cat([ins, cpy, sub], dim=1)
-        posterior = torch.exp(logits)
-        proposal = torch.exp(logits / temperature)
-        proposal = proposal / torch.sum(proposal, dim=1, keepdim=True)
-        
-        next = torch.multinomial(proposal, 1).squeeze(1)
+        posterior = logits
+        proposal = F.log_softmax(logits / temperature, dim=1)
+        next = torch.multinomial(torch.exp(proposal), 1).squeeze(1)
         
         # update particles
         ens_ops[:, i, :] = F.one_hot(op_ids[i].to(device)[next], 5)
@@ -121,25 +145,25 @@ def particle_filter(
         posterior_probs = torch.gather(posterior, dim=1, index=next.unsqueeze(1)).squeeze()
         proposal_probs = torch.gather(proposal, dim=1, index=next.unsqueeze(1)).squeeze()
         
-        weights *= posterior_probs / proposal_probs
-        if M > 1: weights /= torch.sum(weights)
+        weights += posterior_probs - proposal_probs
+        if M > 1: weights -= torch.logsumexp(weights, dim=0)
         
         # maybe resample
-        ess = 1 / torch.sum(weights**2)
-        if ess < threshold and M > 1:
-            samples = torch.multinomial(weights, M, replacement=True)
+        ess = 1 / torch.sum(torch.exp(weights)**2)
+        if ess <= threshold and M > 1:
+            samples = torch.multinomial(torch.exp(weights), M, replacement=True)
             ens_ops = ens_ops[samples]
             ens_toks = ens_toks[samples]
             ens_idxs = ens_idxs[samples]
             ens = (ens_ops, ens_toks, ens_idxs)
             weights = torch.ones(M).to(device) / M
 
-    sample = torch.multinomial(weights / torch.sum(weights), 1)
-    return tuple(map(lambda x: x[sample], ens)), tgt[sample], torch.log(weights[sample])
+    sample = torch.multinomial(torch.exp(weights), 1)
+    return tuple(map(lambda x: x[sample], ens)), tgt[sample], weights[sample]
 
 def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
     model.eval()
-    samples, log_posteriors = zip(*[noise_forward(observed) for _ in range(num_samples)])
+    samples, log_posteriors = zip(*[noise(observed) for _ in range(num_samples)])
     T = max(len(s) for s in samples)
     
     traj_input_ids = torch.stack(

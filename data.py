@@ -10,8 +10,7 @@ from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
 
-from dep import noise_forward
-
+from dep import noise
 from constants import (
     PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID, VOCAB_SIZE,
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID,
@@ -110,7 +109,7 @@ class TrainLoader:
         return cls(traj_list, **kwargs)
     
     def __init__(self, traj_list, bsz, max_len, tokenizer):
-        self.bsz = bsz 
+        self.bsz = bsz
         self.num_batches = (len(traj_list) + bsz - 1) // bsz
         self.traj_input_ids = [
             get_input_ids(t, max_len, tokenizer)
@@ -129,7 +128,7 @@ class TrainLoader:
         
         # doesn't automatically pad, but we normally use bsz=1 anwyays
         # it's more natural for batching to be done through grad accumulation too...
-        batch = torch.stack(self.traj_input_ids[start:end]).to(self.device)
+        batch = self.traj_input_ids[start:end]
         self.cur += 1
         return batch
     
@@ -153,7 +152,7 @@ class EvalLoader:
         traj_list = []
         for observed in tqdm(observed_list, desc='Noising observations'):
             for _ in range(num_samples):
-                traj, log_prob = noise_forward(observed)
+                traj, log_prob = noise(observed)
                 traj_list.append(traj)
                 self.log_probs.append(log_prob)
         
@@ -274,8 +273,8 @@ class EvolverDataset(Dataset):
         traj_list, max_len,
         force_targets=False, name=None,
     ):
-        tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
-        aligner = None # SentenceAligner(model='bert', token_type='bpe', matching_methods='m')
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        aligner = None
         
         self.traj_input_ids = [
             get_input_ids(t, max_len, tokenizer)

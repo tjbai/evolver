@@ -1,5 +1,5 @@
 {
-    "d_model": 768,
+    "d_model": 512,
     "nhead": 12,
     "max_len": 10,
     "encoder_layers": 6,

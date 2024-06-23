@@ -155,7 +155,8 @@ class Evolver(nn.Module):
         self,
         d_model=512, nhead=12, max_len=10,
         encoder_layers=6, decoder_layers=6,
-        use_bert_embeddings=True,
+        vocab_size=VOCAB_SIZE,
+        use_bert_embeddings=False,
         device='cpu'
     ):
         super().__init__()
@@ -164,14 +165,15 @@ class Evolver(nn.Module):
         self.nhead = nhead
         self.max_len = max_len
         self.device = device
+        self.vocab_size = vocab_size
       
-        if self.use_bert_embeddings: 
-            bert = BertModel.from_pretrained('bert-base-multilingual-cased')
-            self.embedding = bert.embeddings.word_embeddings
-            _, self.d_embed = self.embedding.weight.shape
-            self.ff_embedding = nn.Linear(self.d_embed, self.d_model)
-        else:
-            self.embedding = nn.Embedding(VOCAB_SIZE, d_model)
+        # if use_bert_embeddings: 
+        #     bert = BertModel.from_pretrained('bert-base-uncased')
+        #     self.embedding = bert.embeddings.word_embeddings
+        #     _, self.d_embed = self.embedding.weight.shape
+        #     self.ff_embedding = nn.Linear(self.d_embed, self.d_model)
+        # else:
+        self.embedding = nn.Embedding(VOCAB_SIZE, d_model)
         
         self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
         
@@ -187,6 +189,7 @@ class Evolver(nn.Module):
        
         self.op_head = nn.Linear(d_model, 5)
         self.tok_head = nn.Linear(d_model, self.vocab_size)
+        self.tok_head.weight = self.embedding.weight # weight tying
         self.idx_head = nn.Linear(d_model, self.max_len)
     
     def compute_tgt(self, input_ids, memory, edit_tgts):
@@ -209,7 +212,7 @@ class Evolver(nn.Module):
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
             ins_embeds = self.embedding(tok_ids[ins_mask])
-            ins_embeds = self.ff_embedding(ins_embeds)
+            # ins_embeds = self.ff_embedding(ins_embeds)
             tgt[ins_mask] = ins_embeds
             
         # CPY: copy over old embeddings
@@ -222,14 +225,15 @@ class Evolver(nn.Module):
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
             old_embeds = self.embedding(permuted_input_ids[sub_mask])
-            old_embeds = self.ff_embedding(old_embeds) 
+            # old_embeds = self.ff_embedding(old_embeds) 
             new_embeds = self.embedding(tok_ids[sub_mask])
-            new_embeds = self.ff_embedding(new_embeds)
+            # new_embeds = self.ff_embedding(new_embeds)
             tgt[sub_mask] = permuted_memory[sub_mask] - old_embeds + new_embeds
         
         # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
-        tgt[eos_mask] = self.ff_embedding(self.embedding.weight[self.eos_token_id])
+        # tgt[eos_mask] = self.ff_embedding(self.embedding.weight[self.eos_token_id])
+        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id))
         
         # add new positional encodings 
         tgt = self.positional_encoding(tgt, dir=1)
@@ -237,12 +241,13 @@ class Evolver(nn.Module):
         return tgt
     
     def get_src(self, x):
+        pad_mask = x.eq(self.pad_token_id)
         x = self.embedding(x) * np.sqrt(self.d_model)
-        if self.d_embed != self.d_model:
-            x = self.ff_embedding(x)
-            x = F.relu(x)
+        # if self.d_embed != self.d_model:
+        #     x = self.ff_embedding(x)
+        #     x = F.relu(x)
         x = self.positional_encoding(x, dir=1)
-        return x, x.eq(self.pad_token_id) 
+        return x, pad_mask
   
     def forward(
         self,
@@ -355,7 +360,7 @@ class Transformer(nn.Module):
         
         self.pad_token_id = -1 # TODO -- shouldn't have these hardcoded
       
-        # bert = BertModel.from_pretrained('bert-base-multilingual-cased')
+        # bert = BertModel.from_pretrained('bert-base-uncased')
         # self.embedding = bert.embeddings.word_embeddings
         # self.ff_embedding = nn.Linear(768, self.d_model)
         self.embedding = nn.Embedding(self.vocab_size, self.d_model)

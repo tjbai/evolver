@@ -11,7 +11,7 @@
 #SBATCH --mem=80G
 
 ml anaconda
-conda activate ddm
+conda activate evo
 
 python3 train.py \
     --train data/ud/ud.jsonl \

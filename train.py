@@ -205,7 +205,8 @@ def main():
         path=args.eval,
         num_samples=config['eval_samples'],
         max_len=config['max_len'],
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        limit=config['eval_limit']
     ).to(args.device)
     
     train_evolver(

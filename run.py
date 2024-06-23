@@ -2,6 +2,7 @@ import os
 import logging
 import argparse
 import numpy as np
+from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
@@ -35,7 +36,7 @@ def sample_batch(
     traj_edit_tgts = tuple([] for _ in range(3))
     T = max(input_ids.shape[0] for input_ids in batch_ids)
     
-    for input_ids in batch_ids:
+    for input_ids in tqdm(batch_ids, desc='sampling batch'):
         cur_tgts, _ = sample_trajectory(
             evolver, input_ids,
             num_particles, threshold, temperature,

@@ -145,7 +145,14 @@ class EvalLoader:
             
         return cls(observed_list, **kwargs)
     
-    def __init__(self, observed_list, num_samples, max_len, tokenizer):
+    def __init__(
+        self,
+        observed_list,
+        num_samples,
+        max_len,
+        tokenizer,
+        limit=None
+    ):
         self.traj_input_ids = []
         self.log_probs = []
         
@@ -158,13 +165,15 @@ class EvalLoader:
         
         self.traj_input_ids = [get_input_ids(traj, max_len, tokenizer) for traj in traj_list]
         self.num_samples = num_samples
+        self.limit = len(self.traj_input_ids) if limit is None else limit
     
     def __iter__(self):
         self.cur = 0
+        random.shuffle(self.traj_input_ids)
         return self
     
     def __next__(self):
-        if self.cur >= len(self.traj_input_ids): raise StopIteration()
+        if self.cur >= self.limit: raise StopIteration()
         traj_input_ids = self.traj_input_ids[self.cur].to(self.device)
         log_prob = self.log_probs[self.cur]
         self.cur += 1

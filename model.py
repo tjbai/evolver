@@ -231,7 +231,7 @@ class Evolver(nn.Module):
         # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
         # tgt[eos_mask] = self.ff_embedding(self.embedding.weight[self.eos_token_id])
-        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id))
+        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id).to(self.device))
         
         # add new positional encodings 
         tgt = self.positional_encoding(tgt, dir=1)

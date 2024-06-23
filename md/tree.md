@@ -35,3 +35,5 @@ dev:
     "eval_samples": 1
 }
 ```
+
+we run out of memory after sampling just 19 trajectories, so try batch size of 16?

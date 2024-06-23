@@ -7,7 +7,7 @@
 
     "lr": 3e-4,
     "epochs": 10,
-    "bsz": 128,
+    "bsz": 16,
     "grad_accum_steps": 1,
     "checkpoint_at": 5,
     "eval_at": 1,

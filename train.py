@@ -112,8 +112,9 @@ def train_evolver(
         logger.info(f'completed epoch in {(time.time() - s):.3f} seconds')
         
         if (epoch + 1) % checkpoint_at == 0:
-            torch.save(evolver.state_dict(), f'checkpoints/{prefix}-model-{epoch+1}')
-            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-{epoch+1}')
+            save_path = f'/scratch4/jeisner1/{prefix}' if device == 'cuda' else 'checkpoints'
+            torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{epoch+1}')
+            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{epoch+1}')
             
         if (epoch + 1) % eval_at == 0:
             s = time.time()

@@ -37,6 +37,8 @@ def sample_batch(
     T = max(input_ids.shape[0] for input_ids in batch_ids)
     
     for input_ids in tqdm(batch_ids, desc='sampling batch'):
+        input_ids = input_ids.to(device) 
+        
         cur_tgts, _ = sample_trajectory(
             evolver, input_ids,
             num_particles, threshold, temperature,

@@ -2,13 +2,14 @@ import json
 import pickle
 import random
 
+import conllu
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 
 from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
+from torch.utils.data import Dataset
 
 from dep import noise
 from constants import (
@@ -99,58 +100,41 @@ def get_input_ids(trajectory, max_len, tokenizer):
         return_tensors='pt'
     )['input_ids']
     
-class TrainLoader:
-    
+class TrainDataset(Dataset):
+
     @classmethod
     def from_disk(cls, path, **kwargs):
         with open(path, 'r') as f:
             traj_list = [json.loads(line) for line in f.readlines() if line]
-            
         return cls(traj_list, **kwargs)
-    
-    def __init__(self, traj_list, bsz, max_len, tokenizer):
-        self.bsz = bsz
-        self.num_batches = (len(traj_list) + bsz - 1) // bsz
+
+    def __init__(self, traj_list, max_len, tokenizer):
         self.traj_input_ids = [
             get_input_ids(t, max_len, tokenizer)
             for t in tqdm(traj_list, desc='Tokenizing inputs')
         ]
-       
-    def __iter__(self):
-        random.shuffle(self.traj_input_ids)
-        self.cur = 0
-        return self
+
+    def __len__(self):
+        return len(self.traj_input_ids)
+
+    def __getitem__(self, idx):
+        return self.traj_input_ids[idx]
     
-    def __next__(self):
-        if self.cur >= self.num_batches: raise StopIteration()
-        start = self.cur * self.bsz
-        end = min((self.cur + 1) * self.bsz, len(self.traj_input_ids))
-        
-        # doesn't automatically pad, but we normally use bsz=1 anwyays
-        # it's more natural for batching to be done through grad accumulation too...
-        batch = self.traj_input_ids[start:end]
-        self.cur += 1
-        return batch
-    
-    def to(self, device):
-        self.device = device
-        return self
-    
-class EvalLoader:
-    
+class EvalDataset:
+
     @classmethod
     def from_disk(cls, path, **kwargs):
         with open(path, 'r') as f:
-            observed_list = [line.strip() for line in f.readlines() if line]
-            
+            observed_list = conllu.parse(f.read()) #[line.strip() for line in f.readlines() if line]
         return cls(observed_list, **kwargs)
-    
+
     def __init__(
         self,
         observed_list,
         num_samples,
         max_len,
         tokenizer,
+        weight=0.1,
         limit=None
     ):
         self.traj_input_ids = []
@@ -159,29 +143,36 @@ class EvalLoader:
         traj_list = []
         for observed in tqdm(observed_list, desc='Noising observations'):
             for _ in range(num_samples):
-                traj, log_prob = noise(observed)
+                traj, log_prob = noise(observed, w=weight)
                 traj_list.append(traj)
                 self.log_probs.append(log_prob)
         
         self.traj_input_ids = [get_input_ids(traj, max_len, tokenizer) for traj in traj_list]
         self.num_samples = num_samples
         self.limit = len(self.traj_input_ids) if limit is None else limit
+
+    def __len__(self):
+        return self.limit
+
+    def __getitem__(self, idx):
+        return self.traj_input_ids[idx], self.log_probs[idx]
     
-    def __iter__(self):
-        self.cur = 0
-        random.shuffle(self.traj_input_ids)
-        return self
+class Seq2SeqDataset(Dataset):
+   
+    @classmethod
+    def from_disk():
+        pass
     
-    def __next__(self):
-        if self.cur >= self.limit: raise StopIteration()
-        traj_input_ids = self.traj_input_ids[self.cur].to(self.device)
-        log_prob = self.log_probs[self.cur]
-        self.cur += 1
-        return traj_input_ids, log_prob
+    def __init__(self, inputs, outputs, max_len, tokenizer):
+        assert len(inputs) == len(outputs), 'length mismatch'
+        self.input_ids = get_input_ids(inputs, max_len, tokenizer)
+        self.output_ids = get_input_ids(outputs, max_len, tokenizer)
+        
+    def __len__(self):
+        return len(self.input_ids)
     
-    def to(self, device):
-        self.device = device
-        return self
+    def __getitem__(self, idx):
+        return self.input_ids[idx], self.output_ids[idx]
     
 ### logging utilities
 
@@ -269,6 +260,8 @@ def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
         traj_idx_tgts.append(idx_tgts)
         
     return tuple(map(torch.stack, traj_edit_tgts))
+
+### Stuff I'm waiting to delete safely
     
 class EvolverDataset(Dataset):
     

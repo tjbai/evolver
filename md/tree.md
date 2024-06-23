@@ -6,7 +6,7 @@ everything neatly fits under 128 tokens, 64 would be
 a reasonable upper bound with truncation
 
 train:
-12544 sentences, avg traj length 5.66, detokenize with
+12544 sentences, avg traj length 5.66, weight 0.1, detokenize with
 TreebankWordTokenizer, tokenize with bert-base-uncased
 
 dev:

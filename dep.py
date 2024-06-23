@@ -9,6 +9,8 @@ from tqdm import tqdm
 from ordered_set import OrderedSet
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 
+detok = TreebankWordDetokenizer() 
+
 def flip(w):
     return random.choices([True, False], weights=[w, 1-w])[0]
 
@@ -52,7 +54,7 @@ def noise(observed, w):
         seq = [to_text[s] for s in sent]
         if seq and ' '.join(seq) != ' '.join(traj[-1]): traj.append(seq)
 
-    return [''] + traj[::-1], log_prob
+    return list(map(detok.detokenize, [''] + traj[::-1])), log_prob
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -68,13 +70,11 @@ def main():
     with open(args.input, 'r') as f:
         sentences = conllu.parse(f.read())
       
-    detok = TreebankWordDetokenizer() 
     traj_list = []
     length = []
     for sent in tqdm(sentences):
         for _ in range(args.redundant):
             traj = noise(sent, args.weight)[0]
-            traj = list(map(detok.detokenize, traj))
             traj_list.append(traj)
             length.append(len(traj_list[-1]))
             

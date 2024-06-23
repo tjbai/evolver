@@ -6,15 +6,17 @@ import argparse
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 
 from model import Evolver, Transformer
 
 from data import (
     elaborate,
-    TrainLoader,
-    EvalLoader
+    TrainDataset,
+    EvalDataset
 )
 
 from run import sample_trajectory, sample_batch
@@ -125,7 +127,10 @@ def evaluate_evolver(evolver, eval_loader, device):
     evolver.eval()
     cur_eval_losses = []
     
-    for traj_input_ids, log_posterior in eval_loader:
+    for _traj_input_ids, _log_posterior in eval_loader:
+        traj_input_ids = _traj_input_ids.squeeze().to(device)
+        log_posterior = _log_posterior.squeeze()
+        
         traj, log_likelihood = sample_trajectory(
             evolver, traj_input_ids,
             num_particles=1, threshold=0, temperature=1,
@@ -137,6 +142,15 @@ def evaluate_evolver(evolver, eval_loader, device):
         cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
             
     return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
+
+def train_ar(
+    model, optim, train_loader,
+    epochs, checkpoint_at, eval_at,
+    prefix
+):
+    losses = [] 
+    
+    pass
 
 def train_ar(
     model, optim, train_loader,
@@ -193,21 +207,33 @@ def main():
     ).to(args.device)
     
     optim = AdamW(evolver.parameters(), lr=config['lr'])
-    
-    train_loader = TrainLoader.from_disk(
+   
+    train_dataset = TrainDataset.from_disk(
         path=args.train,
-        bsz=config['bsz'],
         max_len=config['max_len'],
         tokenizer=tokenizer
-    ).to(args.device)
+    )
     
-    eval_loader = EvalLoader.from_disk(
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['bsz'],
+        shuffle=True,
+        collate_fn=lambda x: x # prevent from trying to stack mismatch trajectories
+    )
+    
+    eval_dataset = EvalDataset.from_disk(
         path=args.eval,
         num_samples=config['eval_samples'],
         max_len=config['max_len'],
         tokenizer=tokenizer,
         limit=config['eval_limit']
-    ).to(args.device)
+    )
+    
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=1,
+        shuffle=True
+    )
     
     train_evolver(
         evolver, optim, train_loader, eval_loader,

@@ -3,12 +3,10 @@ from time import time
 from functools import wraps
 
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer as T
-
-import numpy as np
-from transformers import BertModel
 
 from constants import (
     VOCAB_SIZE,
@@ -342,8 +340,6 @@ class Evolver(nn.Module):
         N = torch.sum(~traj_pad_mask[:, 1:, :])
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
     
-### Baseline
-
 class Transformer(nn.Module):
     
     def __init__(
@@ -358,7 +354,7 @@ class Transformer(nn.Module):
         self.max_len = max_len
         self.vocab_size = vocab_size
         
-        self.pad_token_id = -1 # TODO -- shouldn't have these hardcoded
+        self.pad_token_id = PAD_TOKEN_ID # TODO -- shouldn't have these hardcoded
       
         # bert = BertModel.from_pretrained('bert-base-uncased')
         # self.embedding = bert.embeddings.word_embeddings

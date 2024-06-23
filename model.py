@@ -298,9 +298,6 @@ class Evolver(nn.Module):
         edit_probs = self.get_probs(edit_logits, pad_mask)
         op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1, :], edit_probs))
         assert op_tgts.shape[1] == self.max_len - 1
-     
-        logger.info(f'MASK: {pad_mask}')
-        logger.info(f'PROB: {op_probs}')
         
         op_tot, op_n = xent(op_probs, op_tgts, ignore=PAD_ID)
         tok_tot, tok_n = xent(tok_probs, tok_tgts, ignore=PAD_TOKEN_ID)

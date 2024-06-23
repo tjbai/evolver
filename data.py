@@ -80,7 +80,7 @@ def pad_traj_edit_tgts(traj_edit_tgts, T):
     
     # covers edge case where trajectory is length 2
     if len(traj_edit_tgts[0].shape) == 2:
-        traj_edit_tgts = tuple(lambda x: x.unsqueeze(0), traj_edit_tgts)
+        traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(0), traj_edit_tgts))
         
     t, max_len, _ = traj_edit_tgts[0].shape
     device = traj_edit_tgts[0].device

@@ -1,47 +1,73 @@
 accelerate==0.31.0
 aiohttp==3.9.5
 aiosignal==1.3.1
+appnope @ file:///home/conda/feedstock_root/build_artifacts/appnope_1707233003401/work
+asttokens @ file:///home/conda/feedstock_root/build_artifacts/asttokens_1698341106958/work
 async-timeout==4.0.3
 attrs==23.2.0
+backcall @ file:///home/conda/feedstock_root/build_artifacts/backcall_1592338393461/work
 certifi==2024.6.2
 charset-normalizer==3.3.2
+click==8.1.7
+comm @ file:///home/conda/feedstock_root/build_artifacts/comm_1710320294760/work
+conllu==4.5.3
 contourpy==1.1.1
 cycler==0.12.1
 datasets==2.20.0
+debugpy @ file:///private/var/folders/sy/f16zz6x50xz3113nwtb9bvq00000gp/T/abs_30hp2nowkm/croot/debugpy_1690905056188/work
+decorator @ file:///home/conda/feedstock_root/build_artifacts/decorator_1641555617451/work
 dill==0.3.8
 docstring_parser==0.16
 eval_type_backport==0.2.0
+executing @ file:///home/conda/feedstock_root/build_artifacts/executing_1698579936712/work
 filelock==3.15.4
 fonttools==4.53.0
 frozenlist==1.4.1
 fsspec==2024.5.0
 huggingface-hub==0.23.4
 idna==3.7
+importlib_metadata @ file:///home/conda/feedstock_root/build_artifacts/importlib-metadata_1718916706452/work
 importlib_resources==6.4.0
+ipykernel @ file:///Users/runner/miniforge3/conda-bld/ipykernel_1717717537056/work
+ipython @ file:///Users/runner/miniforge3/conda-bld/ipython_1680185563420/work
+jedi @ file:///home/conda/feedstock_root/build_artifacts/jedi_1696326070614/work
 Jinja2==3.1.4
 joblib==1.4.2
+jupyter_client @ file:///home/conda/feedstock_root/build_artifacts/jupyter_client_1716472197302/work
+jupyter_core @ file:///Users/runner/miniforge3/conda-bld/jupyter_core_1710257552123/work
 kiwisolver==1.4.5
 markdown-it-py==3.0.0
 MarkupSafe==2.1.5
 matplotlib==3.7.5
+matplotlib-inline @ file:///home/conda/feedstock_root/build_artifacts/matplotlib-inline_1713250518406/work
 mdurl==0.1.2
 mpmath==1.3.0
 multidict==6.0.5
 multiprocess==0.70.16
+nest_asyncio @ file:///home/conda/feedstock_root/build_artifacts/nest-asyncio_1705850609492/work
 networkx==3.1
+nltk==3.8.1
 numpy==1.24.4
 ordered-set==4.1.0
-packaging==24.1
+packaging @ file:///home/conda/feedstock_root/build_artifacts/packaging_1718189413536/work
 pandas==2.0.3
+parso @ file:///home/conda/feedstock_root/build_artifacts/parso_1712320355065/work
+pexpect @ file:///home/conda/feedstock_root/build_artifacts/pexpect_1706113125309/work
+pickleshare @ file:///home/conda/feedstock_root/build_artifacts/pickleshare_1602536217715/work
 pillow==10.3.0
-psutil==6.0.0
+platformdirs @ file:///home/conda/feedstock_root/build_artifacts/platformdirs_1715777629804/work
+prompt_toolkit @ file:///home/conda/feedstock_root/build_artifacts/prompt-toolkit_1718047967974/work
+psutil @ file:///Users/runner/miniforge3/conda-bld/psutil_1705722453990/work
+ptyprocess @ file:///home/conda/feedstock_root/build_artifacts/ptyprocess_1609419310487/work/dist/ptyprocess-0.7.0-py2.py3-none-any.whl
+pure-eval @ file:///home/conda/feedstock_root/build_artifacts/pure_eval_1642875951954/work
 pyarrow==16.1.0
 pyarrow-hotfix==0.6
-Pygments==2.18.0
+Pygments @ file:///home/conda/feedstock_root/build_artifacts/pygments_1714846767233/work
 pyparsing==3.1.2
-python-dateutil==2.9.0.post0
+python-dateutil @ file:///home/conda/feedstock_root/build_artifacts/python-dateutil_1709299778482/work
 pytz==2024.1
 PyYAML==6.0.1
+pyzmq @ file:///Users/runner/miniforge3/conda-bld/pyzmq_1663830595432/work
 regex==2024.5.15
 requests==2.32.3
 rich==13.7.1
@@ -50,18 +76,22 @@ scikit-learn==1.3.2
 scipy==1.10.1
 shtab==1.7.1
 simalign==0.4
-six==1.16.0
+six @ file:///home/conda/feedstock_root/build_artifacts/six_1620240208055/work
+stack-data @ file:///home/conda/feedstock_root/build_artifacts/stack_data_1669632077133/work
 sympy==1.12.1
 threadpoolctl==3.5.0
 tokenizers==0.19.1
 torch==2.2.2
+tornado @ file:///Users/runner/miniforge3/conda-bld/tornado_1717722706676/work
 tqdm==4.66.4
+traitlets @ file:///home/conda/feedstock_root/build_artifacts/traitlets_1713535121073/work
 transformers==4.41.2
 trl==0.9.4
-typing_extensions==4.12.2
+typing_extensions @ file:///home/conda/feedstock_root/build_artifacts/typing_extensions_1717802530399/work
 tyro==0.8.4
 tzdata==2024.1
 urllib3==2.2.2
+wcwidth @ file:///home/conda/feedstock_root/build_artifacts/wcwidth_1704731205417/work
 xxhash==3.4.1
 yarl==1.9.4
-zipp==3.19.2
+zipp @ file:///home/conda/feedstock_root/build_artifacts/zipp_1718013267051/work

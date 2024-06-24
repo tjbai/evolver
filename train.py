@@ -85,6 +85,11 @@ def train_evolver(
        
         s = time.time() 
         for i, batch_ids in enumerate(train_loader):
+            if torch.cuda.is_available():
+                peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+                current_memory = torch.cuda.memory_allocated() / 1024**2
+                logger.info(f'Peak memory: {peak_memory:.2f}MB')
+                logger.info(f'Current memory: {current_memory:.2f}MB')
             
             # E-step
             evolver.eval() 

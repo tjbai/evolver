@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from data import (
     get_align_ids,
@@ -27,6 +28,7 @@ logging.basicConfig()
 logger = logging.getLogger('train')
 logger.setLevel(logging.DEBUG if ('DEBUG' in os.environ) else logging.INFO)
 
+@torch.no_grad()
 def sample_batch(
     evolver, batch_ids,
     num_particles, threshold, temperature,
@@ -37,8 +39,8 @@ def sample_batch(
     T = max(input_ids.shape[0] for input_ids in batch_ids)
     
     for input_ids in tqdm(batch_ids, desc='sampling batch'):
-        input_ids = input_ids.to(device) 
-        
+        input_ids = input_ids.to(device)
+       
         cur_tgts, _ = sample_trajectory(
             evolver, input_ids,
             num_particles, threshold, temperature,

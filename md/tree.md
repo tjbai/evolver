@@ -18,3 +18,16 @@ batch size 32 with 2 accumulation steps seems stable. majority of the loss comes
 
 on GPU takes between 1-1.5 seconds for each particle filter step. by far the largest bottleneck.
 
+WHAT WE NEED:
+- baseline
+    - same size
+    - size * trajectory length
+- AR denoiser
+- evolver
+    - heuristic supervision
+    - particle filter
+
+WE ALSO NEED:
+- batched particle filter
+- survey for hyperparameters
+- lr scheduler

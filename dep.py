@@ -18,43 +18,56 @@ def parse(observed):
     N = len(observed)
     
     parent = {}
-    to_text = {}
+    to_form = {}
     children = defaultdict(set)
     leaves = set(i for i in range(N))
     sent = OrderedSet(i for i in range(N))
     
     for i, token in enumerate(observed):
-        par = token['head']
+        if token['head'] is None:
+            sent.remove(i)
+            continue
+        
+        par = token['head'] - 1
         parent[i] = par
-        to_text[i] = token['form']
+        to_form[i] = token['form']
         children[par].add(i)
         if par in leaves: leaves.remove(par)
         
-    return parent, children, leaves, sent, to_text
+    return parent, children, leaves, sent, to_form
 
 def noise(observed, w):
-    parent, children, leaves, sent, to_text = parse(observed)
-    
+    parent, children, leaves, sent, to_form = parse(observed)
+    traj = [[to_form[s] for s in sent]]
     log_prob = 0
-    traj = [' '.join(to_text[s] for s in sent)]
     
     while leaves:
         cand = list(leaves)
+        updated = False
+        
         for node in cand:
             if flip(w):
                 log_prob += np.log(w)
                 continue
+            
             log_prob += np.log(1-w)
-            leaves.remove(node)
+            updated = True
+           
+            # remove this node 
+            leaves.remove(node) 
             if node in sent: sent.remove(node)
+           
+            # update parent
             if node not in parent: continue
             children[parent[node]].remove(node)
             if not children[parent[node]]: leaves.add(parent[node])
-            
-        seq = [to_text[s] for s in sent]
-        if seq and ' '.join(seq) != ' '.join(traj[-1]): traj.append(seq)
+           
+        if updated:
+            seq = [to_form[s] for s in sent]
+            if ' '.join(seq) == ' '.join(traj[-1]): continue
+            traj.append(seq)
 
-    return list(map(detok.detokenize, [''] + traj[::-1])), log_prob
+    return list(map(detok.detokenize, traj[::-1])), log_prob
 
 def parse_args():
     parser = argparse.ArgumentParser()

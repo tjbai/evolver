@@ -2,38 +2,19 @@
 
 ## ud ewt:
 
-everything neatly fits under 128 tokens, 64 would be
-a reasonable upper bound with truncation
+everything neatly fits under 128 tokens, 64 would be a reasonable upper bound with truncation
 
 train:
-12544 sentences, avg traj length 5.66, weight 0.1, detokenize with
-TreebankWordTokenizer, tokenize with bert-base-uncased
+12544 sentences, avg traj length 5.66, weight 0.1, detokenize wit TreebankWordTokenizer, tokenize with bert-base-uncased
 
 dev:
 2001 sentences, same setup
 
-1.0.0:
-```
-{
-    "d_model": 512,
-    "nhead": 8,
-    "max_len": 64,
-    "encoder_layers": 6,
-    "decoder_layers": 6,
-
-    "lr": 3e-4,
-    "epochs": 10,
-    "bsz": 128,
-    "grad_accum_steps": 1,
-    "checkpoint_at": 5,
-    "eval_at": 1,
-    "eval_limit": 1000,
-
-    "num_particles": 5,
-    "threshold": 2,
-    "temperature": 1,
-    "eval_samples": 1
-}
-```
-
 we run out of memory after sampling just 19 trajectories, so try batch size of 16?
+
+fixed memory leak, we can now do batch size 64 but not consistently (some batches might have longer trajectories)
+
+batch size 32 with 2 accumulation steps seems stable. majority of the loss comes from token (unsurprisingly) -> gives some more credit to the pretraining idea because that would mostly benefit the token head
+
+on GPU takes between 1-1.5 seconds for each particle filter step. by far the largest bottleneck.
+

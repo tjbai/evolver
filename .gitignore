@@ -4,3 +4,5 @@ example.ipynb
 .DS_Store
 **.env
 __pycache__
+**.swp
+**.out

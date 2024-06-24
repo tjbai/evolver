@@ -9,7 +9,7 @@
     "epochs": 10,
     "bsz": 32,
     "grad_accum_steps": 1,
-    "checkpoint_at": 5,
+    "checkpoint_at": 1,
     "eval_at": 1,
     "eval_limit": 1000,
 

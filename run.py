@@ -59,6 +59,7 @@ def sample_batch(
     
     return traj_input_ids, traj_edit_tgts
 
+@torch.no_grad()
 def sample_trajectory(
     evolver, traj_input_ids,
     num_particles, threshold, temperature,
@@ -87,6 +88,7 @@ def sample_trajectory(
     
     return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob
 
+@torch.no_grad()
 def particle_filter(
     evolver, input_ids, output_ids,
     src, src_pad_mask, tgt_pad_mask,
@@ -162,9 +164,9 @@ def particle_filter(
             ens_toks = ens_toks[samples]
             ens_idxs = ens_idxs[samples]
             ens = (ens_ops, ens_toks, ens_idxs)
-            weights = torch.ones(M).to(device) / M
+            weights = torch.zeros(M).to(device)
 
-    sample = torch.multinomial(torch.exp(weights), 1)
+    sample = torch.multinomial(torch.exp(weights), 1) if M > 1 else torch.zeros(1, dtype=torch.long)
     return tuple(map(lambda x: x[sample], ens)), tgt[sample], weights[sample]
 
 def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):

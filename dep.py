@@ -73,7 +73,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('input')
     parser.add_argument('output')
-    parser.add_argument('--redundant', default=1)
+    parser.add_argument('--redundant', default=1, type=int)
     parser.add_argument('--weight', default=0.2, type=float)
     return parser.parse_args()
 

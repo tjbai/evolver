@@ -13,15 +13,9 @@ from transformers import BertTokenizer
 from tqdm import tqdm
 
 from model import Evolver, Transformer
-
-from data import (
-    elaborate,
-    TrainDataset,
-    EvalDataset
-)
-
 from run import sample_trajectory, sample_batch
 from constants import PAD_TOKEN_ID
+from data import elaborate, TrajectoryDataset, StratifiedInfiniteSampler
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -70,9 +64,16 @@ def log_edits(traj_edit_tgts):
         )
     )
     
+def log_memory():
+    if not torch.cuda.is_available(): return
+    peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+    current_memory = torch.cuda.memory_allocated() / 1024**2
+    logger.info(f'Peak memory: {peak_memory:.2f}MB')
+    logger.info(f'Current memory: {current_memory:.2f}MB')
+    
 def train_evolver(
-    evolver, optim, train_loader, eval_loader,
-    epochs, grad_accum_steps, checkpoint_at, eval_at,
+    evolver, optim, lr_scheduler, train_loader, eval_loader,
+    train_steps, grad_accum_steps, checkpoint_at, eval_at,
     num_particles, threshold, temperature,
     device, prefix
 ):
@@ -80,49 +81,43 @@ def train_evolver(
     tok_losses = []
     idx_losses = []
     eval_losses = []
-    
-    for epoch in range(epochs):
-        logger.info(f'starting epoch: {epoch + 1}')
+   
+    for step, (batch_ids, _) in enumerate(train_loader):
+        if step >= train_steps: break
+        logger.info(f'step: {step + 1}')
        
         s = time.time() 
-        for i, (batch_ids, _) in tqdm(enumerate(train_loader)):
-            if torch.cuda.is_available():
-                peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-                current_memory = torch.cuda.memory_allocated() / 1024**2
-                logger.info(f'Peak memory: {peak_memory:.2f}MB')
-                logger.info(f'Current memory: {current_memory:.2f}MB')
-            
-            # E-step
-            evolver.eval() 
-            traj_input_ids, traj_edit_tgts = \
-                sample_batch(evolver, batch_ids, num_particles, threshold, temperature, device)
-          
-            # M-step
-            evolver.train()
-            traj_loss, op_loss, tok_loss, idx_loss = \
-                evolver.traj_loss(traj_input_ids, traj_edit_tgts)
-            
-            if i % grad_accum_steps == 0:
-                optim.zero_grad()
-                traj_loss.backward()
-                optim.step()
-            
-            logger.info(f'loss: {op_loss + tok_loss + idx_loss}')
-            op_losses.append(op_loss.cpu().item())
-            tok_losses.append(tok_loss.cpu().item())
-            idx_losses.append(idx_loss.cpu().item())
-            logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
-            
-            plot_edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
+        log_memory()
         
-        logger.info(f'completed epoch in {(time.time() - s):.3f} seconds')
+        # E-step
+        evolver.eval() 
+        traj_input_ids, traj_edit_tgts = \
+            sample_batch(evolver, batch_ids, num_particles, threshold, temperature, device)
         
-        if (epoch + 1) % checkpoint_at == 0:
+        # M-step
+        evolver.train()
+        traj_loss, op_loss, tok_loss, idx_loss = \
+            evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+        
+        if step % grad_accum_steps == 0:
+            optim.zero_grad()
+            traj_loss.backward()
+            optim.step()
+        
+        logger.info(f'loss: {op_loss + tok_loss + idx_loss}')
+        op_losses.append(op_loss.cpu().item())
+        tok_losses.append(tok_loss.cpu().item())
+        idx_losses.append(idx_loss.cpu().item())
+        logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
+        
+        plot_edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
+    
+        if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/{prefix}' if device == 'cuda' else 'checkpoints'
-            torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{epoch+1}')
-            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{epoch+1}')
+            torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
+            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{step+1}')
             
-        if (epoch + 1) % eval_at == 0:
+        if (step + 1) % eval_at == 0:
             s = time.time()
             avg_eval_loss = evaluate_evolver(evolver, eval_loader, device)
             logger.info(f'completed eval in {(time.time() - s):.3f} seconds')
@@ -147,6 +142,8 @@ def evaluate_evolver(evolver, eval_loader, device):
         log_edits(traj)
         num_toks = torch.sum(traj_input_ids[-1] != PAD_TOKEN_ID)
         cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
+        
+        print(cur_eval_losses[-1])
             
     return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
 
@@ -214,8 +211,8 @@ def main():
     ).to(args.device)
     
     optim = AdamW(evolver.parameters(), lr=config['lr'])
-   
-    train_dataset = TrainDataset.from_disk(
+    
+    train_dataset = TrajectoryDataset.from_disk(
         path=args.train,
         max_len=config['max_len'],
         tokenizer=tokenizer
@@ -223,14 +220,13 @@ def main():
     
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config['bsz'],
-        shuffle=True,
-        collate_fn=lambda x: x # prevent from trying to stack mismatch trajectories
+        batch_size=config['batch_size'],
+        sampler=StratifiedInfiniteSampler(train_dataset, 128),
+        collate_fn=lambda x: x # don't try to stack mismatched trajectories
     )
     
-    eval_dataset = EvalDataset.from_disk(
+    eval_dataset = TrajectoryDataset.from_disk(
         path=args.eval,
-        num_samples=config['eval_samples'],
         max_len=config['max_len'],
         tokenizer=tokenizer,
         limit=config['eval_limit']
@@ -243,8 +239,9 @@ def main():
     )
     
     train_evolver(
-        evolver, optim, train_loader, eval_loader,
-        epochs=config['epochs'],
+        evolver, optim, None,
+        train_loader, eval_loader,
+        train_steps=config['epochs'],
         grad_accum_steps=config['grad_accum_steps'],
         checkpoint_at=config['checkpoint_at'],
         eval_at=config['eval_at'],

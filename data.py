@@ -102,19 +102,9 @@ def get_input_ids(trajectory, max_len, tokenizer):
     )['input_ids']
     
 class TrajectoryDataset(Dataset):
-
-    @classmethod
-    def for_pf(cls, path, **kwargs):
-        with open(path, 'r') as f:
-            traj_list = [json.loads(line) for line in f.readlines() if line]
-        return cls(traj_list, [None for _ in range(len(traj_list))], **kwargs)
     
     @classmethod
-    def for_supervised(cls, path, **kwargs):
-        pass
-    
-    @classmethod
-    def for_eval(cls, path, **kwargs):
+    def from_disk(cls, path, **kwargs):
         traj_list = []
         log_probs = []
         

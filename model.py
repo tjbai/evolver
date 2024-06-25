@@ -353,9 +353,6 @@ class Transformer(nn.Module):
         
         self.pad_token_id = PAD_TOKEN_ID # TODO -- shouldn't have these hardcoded
       
-        # bert = BertModel.from_pretrained('bert-base-uncased')
-        # self.embedding = bert.embeddings.word_embeddings
-        # self.ff_embedding = nn.Linear(768, self.d_model)
         self.embedding = nn.Embedding(self.vocab_size, self.d_model)
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.embedding.weight # weight tying
@@ -365,9 +362,9 @@ class Transformer(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         self.encoder_layers = encoder_layers
-        
-        # decoder_layer = CausalTransformerDecoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
-        # self.decoder = CausalTransformerDecoder(decoder_layer, num_layers=decoder_layers)
+       
+        # standard layers so that we can efficiently evaluate perplexity without extra engineering
+        # afterwards we can load these weights into the Causal* variants for efficient inference
         decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
         self.decoder_layers = decoder_layers
@@ -381,17 +378,11 @@ class Transformer(nn.Module):
     def forward(
         self,
         src, tgt,
-        src_pad_mask, tgt_pad_mask,
-        memory=None, cache=None
+        src_pad_mask,
+        tgt_pad_mask,
     ):
-        # if self.training and memory is not None:
-        #     raise Exception('encoder memory found during training') 
-        
-        # if self.training and cache is not None:
-        #     raise Exception('kv cache found during training')
-        
-        # if memory is None and self.encoder_layers > 0:
-        memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
+        if src is not None:
+            memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
             
         output = self.decoder(
             tgt, memory,

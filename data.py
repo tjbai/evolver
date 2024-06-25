@@ -1,3 +1,4 @@
+import math
 import json
 import pickle
 import random
@@ -9,7 +10,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from dep import noise
 from constants import (
@@ -100,79 +101,104 @@ def get_input_ids(trajectory, max_len, tokenizer):
         return_tensors='pt'
     )['input_ids']
     
-class TrainDataset(Dataset):
+class TrajectoryDataset(Dataset):
 
     @classmethod
-    def from_disk(cls, path, **kwargs):
+    def for_pf(cls, path, **kwargs):
         with open(path, 'r') as f:
             traj_list = [json.loads(line) for line in f.readlines() if line]
-        return cls(traj_list, **kwargs)
+        return cls(traj_list, [None for _ in range(len(traj_list))], **kwargs)
+    
+    @classmethod
+    def for_supervised(cls, path, **kwargs):
+        pass
+    
+    @classmethod
+    def for_eval(cls, path, **kwargs):
+        traj_list = []
+        log_probs = []
+        
+        with open(path, 'r') as f:
+            for line in f.readlines():
+                if not line: continue
+                traj, log_prob = json.loads(line)
+                traj_list.append(traj)
+                log_probs.append(log_prob)
+                
+        return cls(traj_list, log_probs, **kwargs)
 
-    def __init__(self, traj_list, max_len, tokenizer):
+    def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
         self.traj_input_ids = [
             get_input_ids(t, max_len, tokenizer)
             for t in tqdm(traj_list, desc='Tokenizing inputs')
         ]
-
-    def __len__(self):
-        return len(self.traj_input_ids)
-
-    def __getitem__(self, idx):
-        return self.traj_input_ids[idx]
-    
-class EvalDataset:
-
-    @classmethod
-    def from_disk(cls, path, **kwargs):
-        with open(path, 'r') as f:
-            observed_list = conllu.parse(f.read()) #[line.strip() for line in f.readlines() if line]
-        return cls(observed_list, **kwargs)
-
-    def __init__(
-        self,
-        observed_list,
-        num_samples,
-        max_len,
-        tokenizer,
-        weight=0.1,
-        limit=None
-    ):
-        self.traj_input_ids = []
-        self.log_probs = []
-        
-        traj_list = []
-        for observed in tqdm(observed_list, desc='Noising observations'):
-            for _ in range(num_samples):
-                traj, log_prob = noise(observed, w=weight)
-                traj_list.append(traj)
-                self.log_probs.append(log_prob)
-        
-        self.traj_input_ids = [get_input_ids(traj, max_len, tokenizer) for traj in traj_list]
-        self.num_samples = num_samples
+        self.log_probs = log_probs
         self.limit = len(self.traj_input_ids) if limit is None else limit
-
+       
     def __len__(self):
         return self.limit
 
     def __getitem__(self, idx):
+        if self.log_probs is None: return self.traj_input_ids[idx]
         return self.traj_input_ids[idx], self.log_probs[idx]
     
 class Seq2SeqDataset(Dataset):
-   
+    
     @classmethod
-    def from_disk():
-        pass
+    def from_trajectories(cls, path, denoising=True, **kwargs):
+        inputs = []
+        outputs = []
+        
+        with open(path, 'r') as f:
+            for line in f:
+                traj = json.loads(line)
+                
+                if denoising:
+                    for i, input in enumerate(traj[:-1]):
+                        inputs.append(input)
+                        outputs.append(traj[i+1])
+                        
+                else:
+                    inputs.append('')
+                    outputs.append(traj[-1])
+                    
+        return cls(inputs, outputs, **kwargs)
     
     def __init__(self, inputs, outputs, max_len, tokenizer):
         assert len(inputs) == len(outputs), 'length mismatch'
+        print('tokenizing input/output pairs...') # this can take a while
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
+        print('done!')
         
     def __len__(self):
         return len(self.input_ids)
     
     def __getitem__(self, idx):
         return self.input_ids[idx], self.output_ids[idx]
+    
+class StratifiedInfiniteSampler(Sampler):
+    
+    def __init__(self, source, batch_size):
+        self.source = source
+        self.batch_size = batch_size
+        self.num_samples = len(self.source)
+        self.bucket_size = math.ceil(self.num_samples / self.batch_size)
+        
+    def __iter__(self):
+        while True:
+            batch = []
+            
+            for i in range(self.batch_size):
+                start = i * self.bucket_size
+                end = min((i+1) * self.bucket_size, self.num_samples)
+                batch.append(random.randint(start, end - 1))
+                
+            random.shuffle(batch)
+            yield from batch
+    
+    def __len__(self):
+        return float('inf')
     
 ### logging utilities
 
@@ -303,3 +329,40 @@ class EvolverDataset(Dataset):
     
     def __len__(self):
         return len(self.traj_input_ids)
+    
+class EvalDataset:
+
+    @classmethod
+    def from_disk(cls, path, **kwargs):
+        with open(path, 'r') as f:
+            observed_list = conllu.parse(f.read()) #[line.strip() for line in f.readlines() if line]
+        return cls(observed_list, **kwargs)
+
+    def __init__(
+        self,
+        observed_list,
+        num_samples,
+        max_len,
+        tokenizer,
+        weight=0.1,
+        limit=None
+    ):
+        self.traj_input_ids = []
+        self.log_probs = []
+        
+        traj_list = []
+        for observed in tqdm(observed_list, desc='Noising observations'):
+            for _ in range(num_samples):
+                traj, log_prob = noise(observed, w=weight)
+                traj_list.append(traj)
+                self.log_probs.append(log_prob)
+        
+        self.traj_input_ids = [get_input_ids(traj, max_len, tokenizer) for traj in traj_list]
+        self.num_samples = num_samples
+        self.limit = len(self.traj_input_ids) if limit is None else limit
+
+    def __len__(self):
+        return self.limit
+
+    def __getitem__(self, idx):
+        return self.traj_input_ids[idx], self.log_probs[idx]

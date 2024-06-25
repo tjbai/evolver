@@ -84,19 +84,22 @@ def main():
         sentences = conllu.parse(f.read())
       
     traj_list = []
+    log_probs = []
     length = []
+    
     for sent in tqdm(sentences):
         for _ in range(args.redundant):
-            traj = noise(sent, args.weight)[0]
+            traj, log_prob = noise(sent, args.weight)
             traj_list.append(traj)
+            log_probs.append(log_prob)
             length.append(len(traj_list[-1]))
             
     print(f'generated {len(traj_list)} noising trajectories')
     print(f'avg length {sum(length) / len(length)}')
     
     with open(args.output, 'w') as f:
-        for traj in traj_list:
-            json.dump(traj, f)
+        for traj, log_prob in zip(traj_list, log_probs):
+            json.dump([traj, log_prob], f)
             f.write('\n')
     
 if __name__ == '__main__':

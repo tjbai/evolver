@@ -85,7 +85,7 @@ def train_evolver(
         logger.info(f'starting epoch: {epoch + 1}')
        
         s = time.time() 
-        for i, batch_ids in tqdm(enumerate(train_loader)):
+        for i, (batch_ids, _) in tqdm(enumerate(train_loader)):
             if torch.cuda.is_available():
                 peak_memory = torch.cuda.max_memory_allocated() / 1024**2
                 current_memory = torch.cuda.memory_allocated() / 1024**2

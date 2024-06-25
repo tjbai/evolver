@@ -150,15 +150,6 @@ def evaluate_evolver(evolver, eval_loader, device):
 def train_ar(
     model, optim, train_loader,
     epochs, checkpoint_at, eval_at,
-    prefix
-):
-    losses = [] 
-    
-    pass
-
-def train_ar(
-    model, optim, train_loader,
-    epochs, checkpoint_at, eval_at,
     prefix, **_
 ):
     model.train()

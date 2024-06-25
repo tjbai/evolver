@@ -241,9 +241,6 @@ class Evolver(nn.Module):
     def get_src(self, x):
         pad_mask = x.eq(self.pad_token_id)
         x = self.embedding(x) * np.sqrt(self.d_model)
-        # if self.d_embed != self.d_model:
-        #     x = self.ff_embedding(x)
-        #     x = F.relu(x)
         x = self.positional_encoding(x, dir=1)
         return x, pad_mask
   
@@ -358,10 +355,11 @@ class Transformer(nn.Module):
         self.tok_head.weight = self.embedding.weight # weight tying
         
         self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
-        
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
-        self.encoder_layers = encoder_layers
+      
+        if self.encoder_layers > 0: 
+            encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+            self.encoder_layers = encoder_layers
        
         # standard layers so that we can efficiently evaluate perplexity without extra engineering
         # afterwards we can load these weights into the Causal* variants for efficient inference
@@ -381,17 +379,17 @@ class Transformer(nn.Module):
         src_pad_mask,
         tgt_pad_mask,
     ):
-        if src is not None:
+        if self.encoder_layers == 0 and src is not None:
+            raise Exception('src found when encoder_layers == 0')
+        
+        if self.encoder_layers:
             memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
-            
-        output = self.decoder(
-            tgt, memory,
-            tgt_key_padding_mask=tgt_pad_mask,
-            memory_key_padding_mask=src_pad_mask,
-        )
+            output = self.decoder(tgt, memory, tgt_key_padding_mask=tgt_pad_mask, memory_key_padding_mask=src_pad_mask)
+        else:
+            memory = None
+            output = self.decoder(tgt, None, tgt_key_padding_mask=tgt_pad_mask)
         
         tok_logits = self.tok_head(output)
-        
         return tok_logits, memory
     
     def step(self, input_ids, output_ids):

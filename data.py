@@ -1,3 +1,4 @@
+import time
 import math
 import json
 import pickle
@@ -141,7 +142,7 @@ class Seq2SeqDataset(Dataset):
         
         with open(path, 'r') as f:
             for line in f:
-                traj = json.loads(line)
+                traj, _ = json.loads(line)
                 
                 if denoising:
                     for i, input in enumerate(traj[:-1]):
@@ -154,15 +155,20 @@ class Seq2SeqDataset(Dataset):
                     
         return cls(inputs, outputs, **kwargs)
     
-    def __init__(self, inputs, outputs, max_len, tokenizer):
+    def __init__(self, inputs, outputs, max_len, tokenizer, limit=None):
         assert len(inputs) == len(outputs), 'length mismatch'
-        print('tokenizing input/output pairs...') # this can take a while
+       
+        # TODO -- this can take a while and eventually might not fit in memory
+        s = time.time()
+        print('tokenizing input/output pairs...')
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
-        print('done!')
+        print(f'done in {time.time() - s:.2f} seconds!')
+    
+        self.limit = len(self.input_ids) if limit is None else limit
         
     def __len__(self):
-        return len(self.input_ids)
+        return self.limit
     
     def __getitem__(self, idx):
         return self.input_ids[idx], self.output_ids[idx]

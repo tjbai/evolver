@@ -47,25 +47,6 @@ def get_align_ids(input_ids, output_ids):
         
     return op_ids, tok_ids, idx_ids
 
-def get_edit_tgts(edit_seq, max_len):
-    
-    edit_seq = [
-        (op, PAD_TOKEN_ID if tok is None else tok, 0 if idx is None else idx)
-        for (op, tok, idx) in edit_seq
-    ]
-    op_tgts, tok_tgts, idx_tgts = map(lambda x: list(x), (zip(*edit_seq)))
-  
-    # pad and/or truncate
-    if (n := len(op_tgts)) < max_len:
-        op_tgts.extend([PAD_ID for _ in range(max_len-n)])
-        tok_tgts.extend([PAD_TOKEN_ID for _ in range(max_len-n)])
-        idx_tgts.extend([0 for _ in range(max_len-n)])
-        
-    return (
-        F.one_hot(torch.tensor(op_tgts[:max_len]), 5),
-        F.one_hot(torch.tensor(tok_tgts[:max_len]), VOCAB_SIZE),
-        F.one_hot(torch.tensor(idx_tgts[:max_len]), max_len)
-    )
     
 def pad_traj_input_ids(traj_input_ids, T):
     t, max_len = traj_input_ids.shape
@@ -130,8 +111,26 @@ class TrajectoryDataset(Dataset):
         return self.limit
 
     def __getitem__(self, idx):
-        if self.log_probs is None: return self.traj_input_ids[idx]
         return self.traj_input_ids[idx], self.log_probs[idx]
+    
+class SupervisedTrajectoryDataset(TrajectoryDataset):
+    
+    def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
+        super().__init__(traj_list, log_probs, max_len, tokenizer, limit)
+        
+        aligner = SentenceAligner(
+            model='bert-base-uncased',
+            token_type='bpe',
+            matching_methods='m'
+        )
+        
+        self.traj_edit_tgts = [
+            get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
+            for traj in tqdm(traj_list, desc='Computing alignments')
+        ]
+        
+    def __getitem__(self, idx):
+        return self.traj_input_ids[idx], self.traj_edit_tgts[idx]
     
 class Seq2SeqDataset(Dataset):
     
@@ -227,6 +226,7 @@ def elaborate(traj_edit_tgts, batch_first=True):
 ### alignment utilities
 
 def generate_alignment(s1, s2, aligner):
+    if s1 == '': return
     _alignment = aligner.get_word_aligns(s1, s2)['mwmf']
     _alignment.sort(key=lambda x: x[1])
     seen = set()
@@ -265,6 +265,26 @@ def generate_edits(s1, s2, tokenizer, aligner):
          
     # always end with EOS 
     yield EOS_ID, None, None
+    
+def get_edit_tgts(edit_seq, max_len):
+    
+    edit_seq = [
+        (op, PAD_TOKEN_ID if tok is None else tok, 0 if idx is None else idx)
+        for (op, tok, idx) in edit_seq
+    ]
+    op_tgts, tok_tgts, idx_tgts = map(lambda x: list(x), (zip(*edit_seq)))
+  
+    # pad and/or truncate
+    if (n := len(op_tgts)) < max_len:
+        op_tgts.extend([PAD_ID for _ in range(max_len-n)])
+        tok_tgts.extend([PAD_TOKEN_ID for _ in range(max_len-n)])
+        idx_tgts.extend([0 for _ in range(max_len-n)])
+        
+    return (
+        F.one_hot(torch.tensor(op_tgts[:max_len]), 5),
+        F.one_hot(torch.tensor(tok_tgts[:max_len]), VOCAB_SIZE),
+        F.one_hot(torch.tensor(idx_tgts[:max_len]), max_len)
+    )
     
 def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
     traj_edit_tgts = ([], [], [])
@@ -325,40 +345,3 @@ class EvolverDataset(Dataset):
     
     def __len__(self):
         return len(self.traj_input_ids)
-    
-class EvalDataset:
-
-    @classmethod
-    def from_disk(cls, path, **kwargs):
-        with open(path, 'r') as f:
-            observed_list = conllu.parse(f.read()) #[line.strip() for line in f.readlines() if line]
-        return cls(observed_list, **kwargs)
-
-    def __init__(
-        self,
-        observed_list,
-        num_samples,
-        max_len,
-        tokenizer,
-        weight=0.1,
-        limit=None
-    ):
-        self.traj_input_ids = []
-        self.log_probs = []
-        
-        traj_list = []
-        for observed in tqdm(observed_list, desc='Noising observations'):
-            for _ in range(num_samples):
-                traj, log_prob = noise(observed, w=weight)
-                traj_list.append(traj)
-                self.log_probs.append(log_prob)
-        
-        self.traj_input_ids = [get_input_ids(traj, max_len, tokenizer) for traj in traj_list]
-        self.num_samples = num_samples
-        self.limit = len(self.traj_input_ids) if limit is None else limit
-
-    def __len__(self):
-        return self.limit
-
-    def __getitem__(self, idx):
-        return self.traj_input_ids[idx], self.log_probs[idx]

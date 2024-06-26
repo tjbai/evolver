@@ -38,8 +38,7 @@ def sample_batch(
     traj_edit_tgts = tuple([] for _ in range(3))
     T = max(input_ids.shape[0] for input_ids in batch_ids)
     
-    # for input_ids in tqdm(batch_ids, desc='sampling batch'):
-    for input_ids in batch_ids: # TODO -- figure out how to batch this
+    for input_ids in batch_ids:
         input_ids = input_ids.to(device)
        
         cur_tgts, _ = sample_trajectory(

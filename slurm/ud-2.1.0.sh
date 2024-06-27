@@ -13,9 +13,6 @@
 ml anaconda
 conda activate evo
 
-python3 train.py evolver \
-    --train data/ud/ud_train_2.1.0.jsonl \
-    --eval data/ud/ud_dev_2.1.0.jsonl \
+python3 train.py \
     --config configs/ud-2.1.0.json \
-    --prefix ud-2.1.0 \
     --device cuda

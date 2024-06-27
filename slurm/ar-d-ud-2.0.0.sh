@@ -13,9 +13,6 @@
 ml anaconda
 conda activate evo
 
-python3 train.py ar_denoising \
-    --train data/ud/ud_train_2.0.0.jsonl \
-    --eval data/ud/ud_dev_2.0.0.jsonl \
+python3 train.py \
     --config configs/ar-d-ud-2.0.0.json \
-    --prefix ar-d-ud-2.0.0 \
     --device cuda

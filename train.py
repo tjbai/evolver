@@ -214,6 +214,7 @@ def main():
     
     with open(args.config, 'r') as f: config = json.load(f)
     prefix = parse_model_id(args.config)
+    print(f'using: {prefix}')
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         

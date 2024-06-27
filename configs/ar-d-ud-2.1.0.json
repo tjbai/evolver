@@ -9,7 +9,7 @@
     "decoder_layers": 6,
 
     "lr": 3e-4,
-    "train_steps": 1000,
+    "train_steps": 5000,
     "batch_size": 128,
     "grad_accum_steps": 1,
     "checkpoint_at": 200,

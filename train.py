@@ -130,11 +130,9 @@ def evaluate_evolver(evolver, eval_loader, device):
             device=device
         )
         
-        log_edits(traj)
+        #log_edits(traj)
         num_toks = torch.sum(traj_input_ids[-1] != PAD_TOKEN_ID)
         cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
-        
-        print(cur_eval_losses[-1])
             
     return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
 
@@ -204,6 +202,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--compile', action='store_true')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
@@ -259,7 +258,7 @@ def main():
             batch_size=config['batch_size'],
             shuffle=True
         )
-        
+
         train_ar(
             model, optim, None,
             train_loader, eval_loader,
@@ -309,6 +308,11 @@ def main():
             batch_size=1,
             shuffle=True
         )
+
+        if args.compile:
+            logger.info('starting compile')
+            evolver = torch.compile(evolver)
+            logger.info('done')
         
         train_evolver(
             evolver, optim, None,

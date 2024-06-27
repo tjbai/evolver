@@ -27,9 +27,6 @@ def timing(f):
         return result
     return wrap
 
-def section(s):
-    print(f'\n### {s}:')
-
 def xent(logprobs, tgts, ignore=-1):
     loss = torch.sum(logprobs * tgts, dim=-1)
     keep_mask = torch.argmax(tgts, dim=-1) != ignore
@@ -38,7 +35,7 @@ def xent(logprobs, tgts, ignore=-1):
     n = max(torch.sum(keep_mask), 1)
     return -tot, n
 
-class PositionalEncoding(nn.Module):
+class PositionalEncoding(nn.Module): # borrowed from huggingface
     
     def __init__(self, d_model=512, dropout=0.1, max_len=10):
         super().__init__()
@@ -57,9 +54,6 @@ class PositionalEncoding(nn.Module):
     def forward(self, x, dir):
         x = x + dir * self.pe[:, :x.shape[-2], :]
         return self.dropout(x) if dir > 0 else x
-    
-# Borrowed from: https://github.com/alex-matton/causal-transformer-decoder and modified for our use
-# Implements attention key-value cache and implicit causal target mask
     
 class CausalTransformerDecoder(nn.TransformerDecoder):
 
@@ -92,8 +86,6 @@ class CausalTransformerDecoder(nn.TransformerDecoder):
         else: new_cache = torch.stack(new_cache, dim=0)
 
         return x, new_cache
-
-# This part is adapted from the official Pytorch implementation
 
 class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     
@@ -137,8 +129,6 @@ class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
         tgt_last_tok = self.norm3(tgt_last_tok)
         
         return tgt_last_tok
-    
-### Core model
 
 class Evolver(nn.Module):
     
@@ -210,27 +200,23 @@ class Evolver(nn.Module):
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
             ins_embeds = self.embedding(tok_ids[ins_mask])
-            # ins_embeds = self.ff_embedding(ins_embeds)
             tgt[ins_mask] = ins_embeds
             
         # CPY: copy over old embeddings
         cpy_mask = op_ids.eq(CPY_ID)
         if torch.any(cpy_mask):
-            _cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
-            tgt[_cpy_mask] = permuted_memory[_cpy_mask]
+            cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
+            tgt[cpy_mask] = permuted_memory[cpy_mask]
         
         # SUB: subtract old embeddings and add new embeddings
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
             old_embeds = self.embedding(permuted_input_ids[sub_mask])
-            # old_embeds = self.ff_embedding(old_embeds) 
             new_embeds = self.embedding(tok_ids[sub_mask])
-            # new_embeds = self.ff_embedding(new_embeds)
             tgt[sub_mask] = permuted_memory[sub_mask] - old_embeds + new_embeds
         
         # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
-        # tgt[eos_mask] = self.ff_embedding(self.embedding.weight[self.eos_token_id])
         tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id).to(self.device))
         
         # add new positional encodings 
@@ -324,13 +310,8 @@ class Evolver(nn.Module):
             traj_op_tot += op_tot
             traj_tok_tot += tok_tot
             traj_idx_tot += idx_tot
-           
-        # optim.zero_grad()
-        # (-traj_loss).backward()
-        # optim.step()
       
-        # we backpropagate over the per-occurrence loss for each of op, tok, and idx
-        # but, we want to report the total operation loss averaged across all indices
+        # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
     
@@ -356,7 +337,7 @@ class Transformer(nn.Module):
         
         self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
       
-        if self.encoder_layers > 0: 
+        if encoder_layers > 0: 
             encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
             self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
             self.encoder_layers = encoder_layers
@@ -392,14 +373,10 @@ class Transformer(nn.Module):
         tok_logits = self.tok_head(output)
         return tok_logits, memory
     
-    def step(self, input_ids, output_ids):
-        if input_ids is not None: src, src_pad_mask = self.get_src(input_ids)
-        else: src, src_pad_mask = None, None
+    def loss(self, input_ids, output_ids):
+        src, src_pad_mask = self.get_src(input_ids)
         tgt, tgt_pad_mask = self.get_src(output_ids)
         tok_logits, *_ = self.forward(src, tgt, src_pad_mask, tgt_pad_mask)
-        tok_probs = F.log_softmax(tok_logits, dim=-1)
-        return xent(
-            tok_probs[:, :-1],
-            F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
-            ignore=PAD_TOKEN_ID
-        )
+        tok_probs = F.log_softmax(tok_logits, dim=-1)[:, :-1]
+        labels = F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size)
+        return xent(tok_probs, labels, ignore=self.pad_token_id)

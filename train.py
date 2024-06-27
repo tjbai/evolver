@@ -140,7 +140,7 @@ def evaluate_evolver(evolver, eval_loader, device):
 def train_ar(
     model, optim, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    prefix, **_
+    prefix
 ):
     fig, axs = plt.subplots(2)
     axs[0].set_xlabel('train step')
@@ -148,37 +148,48 @@ def train_ar(
     axs[1].set_xlabel('eval step')
     axs[1].set_ylabel('nll/token')
     
-    model.train()
     losses = []
+    eval_losses = []
+    
     for step, (input_ids, output_ids) in enumerate(train_loader):
         if step == train_steps: break
-        
-        loss = model.step(input_ids, output_ids)
+       
+        model.train() 
+        tot_loss, n = model.loss(input_ids, output_ids)
+        loss = tot_loss / n 
         loss.backward()
+        
         if (step + 1) % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
-        
+            
         losses.append(loss.cpu().item())
         logger.info(f'loss: {loss}')
         axs[0].plot(losses)
         plt.savefig(f'figures/{prefix}-loss.png')
         
-    if (step + 1) % checkpoint_at == 0:
-        logger.info('checkpointing...')
-        torch.save(model.state_dict(), f'checkpoints/{prefix}-model-baseline-{step+1}')
-        torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-baseline-{step+1}')
-        
-    if (step + 1) % eval_at == 0:
-        model.eval()
-        eval_losses = []
-        for input_ids, output_ids in eval_loader:
-            loss = model.step(input_ids, output_ids)
-        axs[1].plot(eval_losses)
-        plt.savefig(f'figures/{prefix}-loss.png')
+        if (step + 1) % checkpoint_at == 0:
+            logger.info('checkpointing...')
+            torch.save(model.state_dict(), f'checkpoints/{prefix}-model-baseline-{step+1}')
+            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-baseline-{step+1}')
+            
+        if (step + 1) % eval_at == 0:
+            model.eval()
+            tot_loss = 0
+            tot_n = 0
+            
+            for input_ids, output_ids in eval_loader:
+                loss, n = model.loss(input_ids, output_ids)
+                tot_loss += loss
+                tot_n += n
+                
+            eval_losses.append((tot_loss / tot_n).cpu().item())
+            logger.info(f'eval loss: {eval_losses[-1]}')
+            axs[1].plot(eval_losses)
+            plt.savefig(f'figures/{prefix}-loss.png')
       
     plt.tight_layout()
-    plt.savefig(f'figures/{prefix}-loss/png')      
+    plt.savefig(f'figures/{prefix}-loss.png')
     plt.close(fig)
 
 def parse_args():

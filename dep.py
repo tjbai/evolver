@@ -36,7 +36,7 @@ def parse(observed):
         
     return parent, children, leaves, sent, to_form
 
-def noise(observed, w):
+def noise(observed, w=0.1):
     parent, children, leaves, sent, to_form = parse(observed)
     traj = [[to_form[s] for s in sent]]
     log_prob = 0

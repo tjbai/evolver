@@ -158,14 +158,10 @@ class Seq2SeqDataset(Dataset):
     def __init__(self, inputs, outputs, max_len, tokenizer, limit=None):
         assert len(inputs) == len(outputs), 'length mismatch'
        
-        print(len(inputs))
-        print(inputs)
-       
         # TODO -- this can take a while and eventually might not fit in memory
         s = time.time()
         print('tokenizing input/output pairs...')
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
-        print('finishes this')
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
         print(f'done in {time.time() - s:.2f} seconds!')
     

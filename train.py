@@ -34,7 +34,7 @@ def log_memory():
     if not torch.cuda.is_available(): return
     peak_memory = torch.cuda.max_memory_allocated() / 1024**2
     current_memory = torch.cuda.memory_allocated() / 1024**2
-    logger.info(f'Peak memory: {peak_memory:.2f}MB')
+    #logger.info(f'Peak memory: {peak_memory:.2f}MB')
     logger.info(f'Current memory: {current_memory:.2f}MB')
     
 def plot_edit_loss(op_losses, tok_losses, idx_losses, prefix='test'):
@@ -114,7 +114,8 @@ def train_evolver(
             eval_losses.extend(avg_eval_loss for _ in range(eval_at))
             logger.info(f'eval loss: {eval_losses[-1]}')
             plot_eval_loss(eval_losses, prefix=prefix)
-            
+
+@torch.no_grad()
 def evaluate_evolver(evolver, eval_loader, device):
     evolver.eval()
     cur_eval_losses = []
@@ -152,10 +153,11 @@ def train_ar(
     eval_losses = []
     
     for step, (input_ids, output_ids) in enumerate(train_loader):
+        if step == train_steps: break
+
         input_ids = input_ids.to(device)
         output_ids = output_ids.to(device)
-        
-        if step == train_steps: break
+        log_memory()
        
         model.train() 
         tot_loss, n = model.loss(input_ids, output_ids)
@@ -167,7 +169,7 @@ def train_ar(
             optim.zero_grad()
             
         losses.append(loss.cpu().item())
-        logger.info(f'loss: {loss}')
+        #logger.info(f'loss: {loss}')
         axs[0].plot(losses)
         plt.savefig(f'figures/{prefix}-loss.png')
         
@@ -181,12 +183,13 @@ def train_ar(
             tot_loss = 0
             tot_n = 0
             
-            for input_ids, output_ids in eval_loader:
-                input_ids = input_ids.to(device)
-                output_ids = output_ids.to(device)
-                loss, n = model.loss(input_ids, output_ids)
-                tot_loss += loss
-                tot_n += n
+            with torch.no_grad():
+                for input_ids, output_ids in eval_loader:
+                    input_ids = input_ids.to(device)
+                    output_ids = output_ids.to(device)
+                    loss, n = model.loss(input_ids, output_ids)
+                    tot_loss += loss
+                    tot_n += n
                 
             eval_losses.append((tot_loss / tot_n).cpu().item())
             logger.info(f'eval loss: {eval_losses[-1]}')

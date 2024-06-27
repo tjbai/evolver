@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=8:00:0
 #SBATCH --job-name=train
-#SBATCH --output=train
+#SBATCH --output=ud-2.0.0.out
 #SBATCH --mem=80G
 
 ml anaconda

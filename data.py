@@ -165,10 +165,10 @@ class Seq2SeqDataset(Dataset):
        
         # TODO -- this can take a while and eventually might not fit in memory
         s = time.time()
-        print('tokenizing input/output pairs...')
+        logger.info('tokenizing input/output pairs...')
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
-        print(f'done in {time.time() - s:.2f} seconds!')
+        logger.info(f'done in {time.time() - s:.2f} seconds!')
     
         self.limit = len(self.input_ids) if limit is None else limit
         

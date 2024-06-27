@@ -3,6 +3,7 @@ import math
 import json
 import pickle
 import random
+import logging
 
 import conllu
 import torch
@@ -19,6 +20,10 @@ from constants import (
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID,
     OP_VERB,
 )
+
+logging.basicConfig()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def get_align_ids(input_ids, output_ids):
     N = input_ids.shape[0]

@@ -21,7 +21,6 @@ from run import sample_trajectory, sample_batch
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
    
 def log_edits(traj_edit_tgts):
     logger.debug(
@@ -183,6 +182,8 @@ def train_ar(
             tot_n = 0
             
             for input_ids, output_ids in eval_loader:
+                input_ids = input_ids.to(device)
+                output_ids = output_ids.to(device)
                 loss, n = model.loss(input_ids, output_ids)
                 tot_loss += loss
                 tot_n += n
@@ -261,7 +262,7 @@ def main():
             train_loader, eval_loader,
             train_steps=config['train_steps'],
             grad_accum_steps=config['grad_accum_steps'],
-            checkpiont_at=config['checkpoint_at'],
+            checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
             prefix=prefix
@@ -269,7 +270,6 @@ def main():
        
         
     else:
-        
         evolver = Evolver(
             d_model=config['d_model'],
             nhead=config['nhead'],

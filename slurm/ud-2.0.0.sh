@@ -6,20 +6,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=8:00:0
-#SBATCH --job-name=ud-2.0.0 
-#SBATCH --output=ud-2.0.0.out
+#SBATCH --job-name=train
+#SBATCH --output=train
 #SBATCH --mem=80G
 
 ml anaconda
 conda activate evo
 
-if [ ! -d "/scratch4/jeisner1/ud-2.0.0" ]; then
-  mkdir -p /scratch4/jeisner1/ud-2.0.0
-fi
-
 python3 train.py evolver \
-    --train data/ud/ud_train_2.0.0.jsonl \
-    --eval data/ud/ud_dev_2.0.0.jsonl \
     --config configs/ud-2.0.0.json \
-    --prefix ud-2.0.0 \
     --device cuda

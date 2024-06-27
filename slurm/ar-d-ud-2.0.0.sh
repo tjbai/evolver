@@ -13,10 +13,6 @@
 ml anaconda
 conda activate evo
 
-if [ ! -d "/scratch4/jeisner1/ar-d-ud-2.0.0" ]; then
-  mkdir -p /scratch4/jeisner1/ar-d-ud-2.0.0
-fi
-
 python3 train.py ar_denoising \
     --train data/ud/ud_train_2.0.0.jsonl \
     --eval data/ud/ud_dev_2.0.0.jsonl \

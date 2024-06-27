@@ -1,6 +1,6 @@
 {
-    "train": "data/ud/ud_train_2.0.0.jsonl",
-    "eval": "data/ud/ud_dev_2.0.0.jsonl",
+    "train": "data/ud/ud_train_2.1.0.jsonl",
+    "eval": "data/ud/ud_dev_2.1.0.jsonl",
 
     "d_model": 512,
     "nhead": 8,

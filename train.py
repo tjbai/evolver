@@ -22,7 +22,22 @@ logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# TODO -- set these up as axs in a func and update in train_evolver
+   
+def log_edits(traj_edit_tgts):
+    logger.debug(
+        '\n' + 
+        '\n'.join(
+            ' '.join([e.ljust(8) for e in edit_tgts])
+            for edit_tgts in elaborate(traj_edit_tgts)
+        ))
+    
+def log_memory():
+    if not torch.cuda.is_available(): return
+    peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+    current_memory = torch.cuda.memory_allocated() / 1024**2
+    logger.info(f'Peak memory: {peak_memory:.2f}MB')
+    logger.info(f'Current memory: {current_memory:.2f}MB')
+    
 def plot_edit_loss(op_losses, tok_losses, idx_losses, prefix='test'):
     fig, ax = plt.subplots()
     ax.plot(op_losses, color='red', label='op loss')
@@ -46,21 +61,6 @@ def plot_eval_loss(eval_losses, prefix='test'):
     plt.tight_layout()
     plt.savefig(f'figures/{prefix}-eval-loss.png')
     plt.close(fig)
-   
-def log_edits(traj_edit_tgts):
-    logger.debug(
-        '\n' + 
-        '\n'.join(
-            ' '.join([e.ljust(8) for e in edit_tgts])
-            for edit_tgts in elaborate(traj_edit_tgts)
-        ))
-    
-def log_memory():
-    if not torch.cuda.is_available(): return
-    peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-    current_memory = torch.cuda.memory_allocated() / 1024**2
-    logger.info(f'Peak memory: {peak_memory:.2f}MB')
-    logger.info(f'Current memory: {current_memory:.2f}MB')
     
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
@@ -104,7 +104,7 @@ def train_evolver(
         plot_edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
     
         if (step + 1) % checkpoint_at == 0:
-            save_path = f'/scratch4/jeisner1/{prefix}' if device == 'cuda' else 'checkpoints'
+            save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
             torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
             torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{step+1}')
             
@@ -173,9 +173,9 @@ def train_ar(
         plt.savefig(f'figures/{prefix}-loss.png')
         
         if (step + 1) % checkpoint_at == 0:
-            logger.info('checkpointing...')
-            torch.save(model.state_dict(), f'checkpoints/{prefix}-model-baseline-{step+1}')
-            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-baseline-{step+1}')
+            save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
+            torch.save(model.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
+            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{step+1}')
             
         if (step + 1) % eval_at == 0:
             model.eval()
@@ -198,7 +198,6 @@ def train_ar(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('model')
     parser.add_argument('--config', required=True)
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--log-level', default='INFO')
@@ -217,10 +216,59 @@ def main():
     prefix = parse_model_id(args.config)
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    
-    # this is ugly but who cares
         
-    if args.model == 'evolver':
+    if prefix.startswith('ar-d'): # who cares about readable code
+        
+        model = Transformer(
+            d_model=config['d_model'],
+            nhead=config['nhead'],
+            max_len=config['max_len'],
+            encoder_layers=config['encoder_layers'],
+            decoder_layers=config['decoder_layers']
+        ).to(args.device)
+        
+        optim = AdamW(model.parameters(), lr=config['lr'])
+        
+        train_dataset = Seq2SeqDataset.from_trajectories(
+            path=config['train'],
+            denoising=True,
+            max_len=config['max_len'],
+            tokenizer=tokenizer
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
+        )
+        
+        eval_dataset = Seq2SeqDataset.from_trajectories(
+            path=config['eval'],
+            denoising=True,
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=config['batch_size'],
+            shuffle=True
+        )
+        
+        train_ar(
+            model, optim, None,
+            train_loader, eval_loader,
+            train_steps=config['train_steps'],
+            grad_accum_steps=config['grad_accum_steps'],
+            checkpiont_at=config['checkpoint_at'],
+            eval_at=config['eval_at'],
+            device=args.device,
+            prefix=prefix
+        ) 
+       
+        
+    else:
+        
         evolver = Evolver(
             d_model=config['d_model'],
             nhead=config['nhead'],
@@ -271,54 +319,7 @@ def main():
             device=args.device,
             prefix=prefix
         )
-        
-    elif args.model == 'ar_denoising':
-        model = Transformer(
-            d_model=config['d_model'],
-            nhead=config['nhead'],
-            max_len=config['max_len'],
-            encoder_layers=config['encoder_layers'],
-            decoder_layers=config['decoder_layers']
-        ).to(args.device)
-        
-        optim = AdamW(model.parameters(), lr=config['lr'])
-        
-        train_dataset = Seq2SeqDataset.from_trajectories(
-            path=config['train'],
-            denoising=True,
-            max_len=config['max_len'],
-            tokenizer=tokenizer
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
-        )
-        
-        eval_dataset = Seq2SeqDataset.from_trajectories(
-            path=config['eval'],
-            denoising=True,
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
-            batch_size=config['batch_size'],
-            shuffle=True
-        )
-        
-        train_ar(
-            model, optim, None,
-            train_loader, eval_loader,
-            train_steps=config['train_steps'],
-            grad_accum_steps=config['grad_accum_steps'],
-            checkpiont_at=config['checkpoint_at'],
-            eval_at=config['eval_at'],
-            device=args.device,
-            prefix=prefix
-        )
+       
 
 if __name__ == '__main__':
     main()

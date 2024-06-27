@@ -13,10 +13,6 @@
 ml anaconda
 conda activate evo
 
-if [ ! -d "/scratch4/jeisner1/ud-2.1.0" ]; then
-  mkdir -p /scratch4/jeisner1/ud-2.1.0
-fi
-
 python3 train.py evolver \
     --train data/ud/ud_train_2.1.0.jsonl \
     --eval data/ud/ud_dev_2.1.0.jsonl \

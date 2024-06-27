@@ -121,7 +121,8 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
         aligner = SentenceAligner(
             model='bert-base-uncased',
             token_type='bpe',
-            matching_methods='m'
+            matching_methods='m',
+            device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         
         self.traj_edit_tgts = [

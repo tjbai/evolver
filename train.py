@@ -294,7 +294,7 @@ def main():
             train_dataset,
             batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=lambda x: x # don't try to stack mismatched trajectories
+            collate_fn=lambda x: zip(*x) # don't worry about it
         )
         
         eval_dataset = TrajectoryDataset.from_disk(

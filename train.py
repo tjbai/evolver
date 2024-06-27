@@ -12,10 +12,10 @@ from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 from tqdm import tqdm
 
+from constants import PAD_TOKEN_ID
+from data import elaborate, TrajectoryDataset, Seq2SeqDataset, StratifiedInfiniteSampler
 from model import Evolver, Transformer
 from run import sample_trajectory, sample_batch
-from constants import PAD_TOKEN_ID
-from data import elaborate, TrajectoryDataset, StratifiedInfiniteSampler
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -138,9 +138,9 @@ def evaluate_evolver(evolver, eval_loader, device):
     return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
 
 def train_ar(
-    model, optim, train_loader, eval_loader,
+    model, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    prefix
+    device, prefix
 ):
     fig, axs = plt.subplots(2)
     axs[0].set_xlabel('train step')
@@ -152,6 +152,9 @@ def train_ar(
     eval_losses = []
     
     for step, (input_ids, output_ids) in enumerate(train_loader):
+        input_ids = input_ids.to(device)
+        output_ids = output_ids.to(device)
+        
         if step == train_steps: break
        
         model.train() 
@@ -194,107 +197,120 @@ def train_ar(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train')
-    parser.add_argument('--eval')
-    parser.add_argument('--config')
-    parser.add_argument('--prefix')
+    parser.add_argument('model')
+    parser.add_argument('--train', required=True)
+    parser.add_argument('--eval', required=True)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--prefix', required=True)
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
-    
+
 def main():
     args = parse_args()
     logger.setLevel(getattr(logging, args.log_level))
-    
-    with open(args.config, 'r') as f:
-        config = json.load(f)
-        
+    with open(args.config, 'r') as f: config = json.load(f)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         
-    evolver = Evolver(
-        d_model=config['d_model'],
-        nhead=config['nhead'],
-        max_len=config['max_len'],
-        encoder_layers=config['encoder_layers'],
-        decoder_layers=config['decoder_layers'],
-        device=args.device
-    ).to(args.device)
-    
-    optim = AdamW(evolver.parameters(), lr=config['lr'])
-    
-    train_dataset = TrajectoryDataset.from_disk(
-        path=args.train,
-        max_len=config['max_len'],
-        tokenizer=tokenizer
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        sampler=StratifiedInfiniteSampler(train_dataset, 128),
-        collate_fn=lambda x: x # don't try to stack mismatched trajectories
-    )
-    
-    eval_dataset = TrajectoryDataset.from_disk(
-        path=args.eval,
-        max_len=config['max_len'],
-        tokenizer=tokenizer,
-        limit=config['eval_limit']
-    )
-    
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=1,
-        shuffle=True
-    )
-    
-    train_evolver(
-        evolver, optim, None,
-        train_loader, eval_loader,
-        train_steps=config['epochs'],
-        grad_accum_steps=config['grad_accum_steps'],
-        checkpoint_at=config['checkpoint_at'],
-        eval_at=config['eval_at'],
-        num_particles=config['num_particles'],
-        threshold=config['threshold'],
-        temperature=config['temperature'],
-        device=args.device,
-        prefix=args.prefix
-    )
+    if args.model == 'evolver':
+        evolver = Evolver(
+            d_model=config['d_model'],
+            nhead=config['nhead'],
+            max_len=config['max_len'],
+            encoder_layers=config['encoder_layers'],
+            decoder_layers=config['decoder_layers'],
+            device=args.device
+        ).to(args.device)
+        
+        optim = AdamW(evolver.parameters(), lr=config['lr'])
+        
+        train_dataset = TrajectoryDataset.from_disk(
+            path=args.train,
+            max_len=config['max_len'],
+            tokenizer=tokenizer
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
+            collate_fn=lambda x: x # don't try to stack mismatched trajectories
+        )
+        
+        eval_dataset = TrajectoryDataset.from_disk(
+            path=args.eval,
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+            limit=config['eval_limit']
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=1,
+            shuffle=True
+        )
+        
+        train_evolver(
+            evolver, optim, None,
+            train_loader, eval_loader,
+            train_steps=config['train_steps'],
+            grad_accum_steps=config['grad_accum_steps'],
+            checkpoint_at=config['checkpoint_at'],
+            eval_at=config['eval_at'],
+            num_particles=config['num_particles'],
+            threshold=config['threshold'],
+            temperature=config['temperature'],
+            device=args.device,
+            prefix=args.prefix
+        )
+        
+    elif args.model == 'ar_denoising':
+        model = Transformer(
+            d_model=config['d_model'],
+            nhead=config['nhead'],
+            max_len=config['max_len'],
+            encoder_layers=config['encoder_layers'],
+            decoder_layers=config['decoder_layers']
+        ).to(args.device)
+        
+        optim = AdamW(model.parameters(), lr=config['lr'])
+        
+        train_dataset = Seq2SeqDataset.from_trajectories(
+            path=args.train,
+            denoising=True,
+            max_len=config['max_len'],
+            tokenizer=tokenizer
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
+        )
+        
+        eval_dataset = Seq2SeqDataset.from_trajectories(
+            path=args.eval,
+            denoising=True,
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=config['batch_size'],
+            shuffle=True
+        )
+        
+        train_ar(
+            model, optim, None,
+            train_loader, eval_loader,
+            train_steps=config['train_steps'],
+            grad_accum_steps=config['grad_accum_steps'],
+            checkpiont_at=config['checkpoint_at'],
+            eval_at=config['eval_at'],
+            device=args.device,
+            prefix=args.prefix
+        )
 
 if __name__ == '__main__':
     main()
-            
-### deprecated
-
-def train_forced(
-    evolver, optim, train_loader,
-    epochs, checkpoint_at, eval_at, prefix
-):
-    evolver.train()
-
-    op_losses = []
-    tok_losses = []
-    idx_losses = []
-    
-    for epoch in range(epochs):
-        logger.info(f'starting epoch: {epoch + 1}') 
-        
-        for batch in train_loader:
-            op_loss, tok_loss, idx_loss = evolver.step(optim, *batch)
-
-            logger.info(f'loss: {-(op_loss + tok_loss + idx_loss)}')
-            op_losses.append(-op_loss.cpu().item())
-            tok_losses.append(-tok_loss.cpu().item())
-            idx_losses.append(-idx_loss.cpu().item())
-            logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
-            
-            plt.edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
-        
-        if (epoch + 1) % checkpoint_at == 0:
-            logger.info('checkpointing...')
-            torch.save(evolver.state_dict(), f'checkpoints/{prefix}-model-{epoch+1}')
-            torch.save(optim.state_dict(), f'checkpoints/{prefix}-optim-{epoch+1}')
-            
-        if (epoch + 1) % eval_at == 0:
-            pass

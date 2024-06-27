@@ -1,0 +1,14 @@
+{
+    "d_model": 512,
+    "nhead": 8,
+    "max_len": 64,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+
+    "lr": 3e-4,
+    "train_steps": 1000,
+    "bsz": 128,
+    "grad_accum_steps": 1,
+    "checkpoint_at": 200,
+    "eval_at": 200
+}

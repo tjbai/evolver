@@ -144,7 +144,6 @@ class Evolver(nn.Module):
         d_model=512, nhead=12, max_len=10,
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
-        use_bert_embeddings=False,
         device='cpu'
     ):
         super().__init__()
@@ -155,14 +154,7 @@ class Evolver(nn.Module):
         self.device = device
         self.vocab_size = vocab_size
       
-        # if use_bert_embeddings: 
-        #     bert = BertModel.from_pretrained('bert-base-uncased')
-        #     self.embedding = bert.embeddings.word_embeddings
-        #     _, self.d_embed = self.embedding.weight.shape
-        #     self.ff_embedding = nn.Linear(self.d_embed, self.d_model)
-        # else:
         self.embedding = nn.Embedding(VOCAB_SIZE, d_model)
-        
         self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
         
         self.pad_token_id = PAD_TOKEN_ID
@@ -177,7 +169,7 @@ class Evolver(nn.Module):
        
         self.op_head = nn.Linear(d_model, 5)
         self.tok_head = nn.Linear(d_model, self.vocab_size)
-        self.tok_head.weight = self.embedding.weight # weight tying
+        self.tok_head.weight = self.embedding.weight # tie weights
         self.idx_head = nn.Linear(d_model, self.max_len)
     
     def compute_tgt(self, input_ids, memory, edit_tgts):
@@ -319,7 +311,7 @@ class Transformer(nn.Module):
     
     def __init__(
         self,
-        d_model=512, nhead=8, max_len=10, vocab_size=10,
+        d_model=512, nhead=8, max_len=10, vocab_size=VOCAB_SIZE, # NOTE -- dangerous
         encoder_layers=6, decoder_layers=6
     ):
         super().__init__()

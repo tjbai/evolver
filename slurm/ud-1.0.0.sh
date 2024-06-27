@@ -17,7 +17,7 @@ if [ ! -d "/scratch4/jeisner1/ud-1.0.0" ]; then
   mkdir -p /scratch4/jeisner1/ud-1.0.0
 fi
 
-python3 train.py \
+python3 train.py evolver \
     --train data/ud/ud.jsonl \
     --eval data/ud/en_ewt-ud-dev.conllu \
     --config configs/ud-1.0.0.json \

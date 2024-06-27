@@ -8,8 +8,8 @@
     "lr": 3e-4,
     "epochs": 10,
     "bsz": 32,
-    "grad_accum_steps": 2,
-    "checkpoint_at": 5,
+    "grad_accum_steps": 1,
+    "checkpoint_at": 1,
     "eval_at": 1,
     "eval_limit": 1000,
 

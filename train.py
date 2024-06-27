@@ -1,3 +1,4 @@
+import os
 import time
 import json
 import logging
@@ -198,19 +199,26 @@ def train_ar(
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('model')
-    parser.add_argument('--train', required=True)
-    parser.add_argument('--eval', required=True)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--prefix', required=True)
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
+def parse_model_id(s):
+    _, name = os.path.split(s)
+    id = '.'.join(name.split('.')[:-1]) or name
+    return id
+
 def main():
     args = parse_args()
     logger.setLevel(getattr(logging, args.log_level))
+    
     with open(args.config, 'r') as f: config = json.load(f)
+    prefix = parse_model_id(args.config)
+    
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    
+    # this is ugly but who cares
         
     if args.model == 'evolver':
         evolver = Evolver(
@@ -225,7 +233,7 @@ def main():
         optim = AdamW(evolver.parameters(), lr=config['lr'])
         
         train_dataset = TrajectoryDataset.from_disk(
-            path=args.train,
+            path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer
         )
@@ -238,7 +246,7 @@ def main():
         )
         
         eval_dataset = TrajectoryDataset.from_disk(
-            path=args.eval,
+            path=config['eval'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
             limit=config['eval_limit']
@@ -261,7 +269,7 @@ def main():
             threshold=config['threshold'],
             temperature=config['temperature'],
             device=args.device,
-            prefix=args.prefix
+            prefix=prefix
         )
         
     elif args.model == 'ar_denoising':
@@ -276,7 +284,7 @@ def main():
         optim = AdamW(model.parameters(), lr=config['lr'])
         
         train_dataset = Seq2SeqDataset.from_trajectories(
-            path=args.train,
+            path=config['train'],
             denoising=True,
             max_len=config['max_len'],
             tokenizer=tokenizer
@@ -289,7 +297,7 @@ def main():
         )
         
         eval_dataset = Seq2SeqDataset.from_trajectories(
-            path=args.eval,
+            path=config['eval'],
             denoising=True,
             max_len=config['max_len'],
             tokenizer=tokenizer,
@@ -309,7 +317,7 @@ def main():
             checkpiont_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
-            prefix=args.prefix
+            prefix=prefix
         )
 
 if __name__ == '__main__':

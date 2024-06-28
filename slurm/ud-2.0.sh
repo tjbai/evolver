@@ -14,5 +14,5 @@ ml anaconda
 conda activate evo
 
 python3 train.py \
-    --config configs/ud-2.0.0.json \
+    --config configs/ud-2.0.json \
     --device cuda

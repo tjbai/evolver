@@ -173,30 +173,31 @@ def main():
     )
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    
+    Model = Transformer if prefix.startswith('ar') else Evolver
+    model = Model(
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        max_len=config['max_len'],
+        encoder_layers=config['encoder_layers'],
+        decoder_layers=config['decoder_layers'],
+        device=args.device
+    ).to(args.device)
+    
+    optim = AdamW(model.parameters(), lr=config['lr'])
+    
+    lr_scheduler = OneCycleLR(
+        optim,
+        max_lr=config['lr'],
+        total_steps=config['train_steps'],
+        pct_start=config['warmup_percent'],
+        anneal_strategy='cos',
+        cycle_momentum=False,
+        div_factor=10,
+        final_div_factor=1
+    )
         
     if prefix.startswith('ar-d'):
-        
-        model = Transformer(
-            d_model=config['d_model'],
-            nhead=config['nhead'],
-            max_len=config['max_len'],
-            encoder_layers=config['encoder_layers'],
-            decoder_layers=config['decoder_layers'],
-            device=args.device
-        ).to(args.device)
-        
-        optim = AdamW(model.parameters(), lr=config['lr'])
-        
-        lr_scheduler = OneCycleLR(
-            optim,
-            max_lr=config['lr'],
-            total_steps=config['train_steps'],
-            pct_start=config['warmup_percent'],
-            anneal_strategy='cos',
-            cycle_momentum=False,
-            div_factor=10,
-            final_div_factor=1
-        )
         
         train_dataset = Seq2SeqDataset.from_trajectories(
             path=config['train'],
@@ -236,28 +237,6 @@ def main():
         ) 
         
     else:
-        evolver = Evolver(
-            d_model=config['d_model'],
-            nhead=config['nhead'],
-            max_len=config['max_len'],
-            encoder_layers=config['encoder_layers'],
-            decoder_layers=config['decoder_layers'],
-            device=args.device
-        ).to(args.device)
-        
-        optim = AdamW(evolver.parameters(), lr=config['lr'])
-        
-        lr_scheduler = OneCycleLR(
-            optim,
-            max_lr=config['lr'],
-            total_steps=config['train_steps'],
-            pct_start=config['warmup_percent'],
-            anneal_strategy='cos',
-            cycle_momentum=False,
-            div_factor=10,
-            final_div_factor=1
-        )
-        
         train_dataset = TrajectoryDataset.from_disk(
             path=config['train'],
             max_len=config['max_len'],
@@ -285,7 +264,7 @@ def main():
         )
         
         train_evolver(
-            evolver, optim, None,
+            model, optim, None,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
             grad_accum_steps=config['grad_accum_steps'],

@@ -255,8 +255,6 @@ class Evolver(nn.Module):
         tok_logits = self.tok_head(output)
         idx_logits = self.idx_head(output)
         
-        print(op_logits.shape, tok_logits.shape, idx_logits.shape)
-        
         return (
             (op_logits, tok_logits, idx_logits),
             tgt, memory, new_cache

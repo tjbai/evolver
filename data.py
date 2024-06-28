@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def get_align_ids(input_ids, output_ids):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
     N = input_ids.shape[0]
     op_ids, tok_ids, idx_ids = ([], [], [])
 
@@ -33,21 +35,21 @@ def get_align_ids(input_ids, output_ids):
         C = torch.sum(input_ids.eq(forced))
         
         op_ids.append(torch.cat([
-            torch.tensor([INS_ID]),
-            torch.tensor([CPY_ID]).repeat(C),
-            torch.tensor([SUB_ID]).repeat(N)
+            torch.tensor([INS_ID], device=device),
+            torch.tensor([CPY_ID], device=device).repeat(C),
+            torch.tensor([SUB_ID], device=device).repeat(N)
         ]))
         
         tok_ids.append(torch.cat([
-            torch.tensor([forced]),
-            torch.tensor([PAD_TOKEN_ID]).repeat(C),
-            torch.tensor([forced]).repeat(N)
+            torch.tensor([forced], device=device),
+            torch.tensor([PAD_TOKEN_ID], device=device).repeat(C),
+            torch.tensor([forced], device=device).repeat(N)
         ]))
         
         idx_ids.append(torch.cat([
-            torch.tensor([0]),
-            torch.arange(N)[input_ids.eq(forced).to('cpu')],
-            torch.arange(N)
+            torch.tensor([0], device=device),
+            torch.arange(N, device=device)[input_ids.eq(forced)],
+            torch.arange(N, device=device)
         ]))
         
     return op_ids, tok_ids, idx_ids
@@ -221,6 +223,8 @@ def to_str(op, tok, idx, prev_toks=None, tokenizer=None):
     if tok and idx: return f'SUB({tok_str}, {idx_str})'
     elif tok: return f'INS({tok_str})'
     elif idx: return f'CPY({idx_str})'
+    
+    raise Exception('Invalid op/tok/idx combination')
 
 def elaborate(traj_edit_tgts, batch_first=True):
     if len(traj_edit_tgts[0].shape) == 3: traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(1), traj_edit_tgts))

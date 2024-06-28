@@ -10,7 +10,6 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from data import (
     get_align_ids,
-    get_edit_tgts,
     get_input_ids,
     pad_traj_input_ids,
     pad_traj_edit_tgts
@@ -19,8 +18,8 @@ from data import (
 from dep import noise
 
 from constants import (
-    PAD_TOKEN_ID, EOS_TOKEN_ID,
-    INS_ID, CPY_ID, SUB_ID, EOS_ID, INS_BOS,
+    BOS_TOKEN_ID, PAD_TOKEN_ID, EOS_TOKEN_ID,
+    INS_ID, CPY_ID, SUB_ID, EOS_ID,
     VOCAB_SIZE
 )
 
@@ -99,12 +98,17 @@ def particle_filter(
     src_pad_mask = src_pad_mask.repeat(M, 1)
     tgt_pad_mask = tgt_pad_mask.repeat(M, 1)
     
-    # initialize particles and weights 
-    weights = torch.zeros(M).to(device)
-    _ens = get_edit_tgts([INS_BOS], evolver.max_len)
-    ens = tuple(map(lambda x: x.unsqueeze(0).repeat(M, 1, 1).to(device), _ens))
-    ens_ops, ens_toks, ens_idxs = ens
+    # initialize weights
+    weights = torch.zeros(M, device=device)
    
+    # preallocate and initialize particles
+    ens_ops = torch.zeros(M, evolver.max_len, 5, device=device)
+    ens_toks = torch.zeros(M, evolver.max_len, VOCAB_SIZE, device=device)
+    ens_idxs = torch.zeros(M, evolver.max_len, evolver.max_len, device=device)
+    ens_ops[:, 0, 0] = 1
+    ens_toks[:, 0, BOS_TOKEN_ID] = 1
+    ens_idxs[:, 0, 0] = 1
+    
     # precompute edit ids
     op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids)
     
@@ -114,7 +118,7 @@ def particle_filter(
         # forward pass 
         edit_logits, tgt, memory, cache = evolver.forward(
             input_ids, src,
-            tuple(map(lambda x: x[:, :i, :], ens)),
+            (ens_ops, ens_toks, ens_idxs),
             src_pad_mask, tgt_pad_mask,
             memory, cache
         )
@@ -124,11 +128,10 @@ def particle_filter(
         
         # handle EOS
         if forced == EOS_TOKEN_ID:
-            eos = op_probs[:, -1, EOS_ID]
-            ens_ops[:, i, :] = F.one_hot(torch.tensor(EOS_ID), 5).repeat(M, 1)
-            ens_toks[:, i, :] = F.one_hot(torch.tensor(PAD_TOKEN_ID), VOCAB_SIZE).repeat(M, 1)
-            ens_idxs[:, i, :] = F.one_hot(torch.tensor(0), evolver.max_len).repeat(M, 1)
-            weights += eos
+            ens_ops[:, i, EOS_ID] = 1
+            ens_toks[:, i, PAD_TOKEN_ID] = 1
+            ens_idxs[:, i, 0] = 1
+            weights += op_probs[:, -1, EOS_ID]
             if M > 1: weights -= torch.logsumexp(weights, dim=0)
             break
     
@@ -138,20 +141,18 @@ def particle_filter(
         sub = op_probs[:, -1, SUB_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1) + idx_probs[:, -1, :]
         
         # normalize proposal and sample
-        logits = torch.cat([ins, cpy, sub], dim=1)
-        posterior = logits
-        proposal = F.log_softmax(logits / temperature, dim=1)
+        posterior = torch.cat([ins, cpy, sub], dim=1)
+        proposal = F.log_softmax(posterior / temperature, dim=1)
         next = torch.multinomial(torch.exp(proposal), 1).squeeze(1)
         
         # update particles
-        ens_ops[:, i, :] = F.one_hot(op_ids[i].to(device)[next], 5)
-        ens_toks[:, i, :] = F.one_hot(tok_ids[i].to(device)[next], VOCAB_SIZE)
-        ens_idxs[:, i, :] = F.one_hot(idx_ids[i].to(device)[next], evolver.max_len)
+        ens_ops[:, i, op_ids[i][next]] = 1
+        ens_toks[:, i, tok_ids[i][next]] = 1
+        ens_idxs[:, i, idx_ids[i][next]] = 1
         
         # update weights
         posterior_probs = torch.gather(posterior, dim=1, index=next.unsqueeze(1)).squeeze()
         proposal_probs = torch.gather(proposal, dim=1, index=next.unsqueeze(1)).squeeze()
-        
         weights += posterior_probs - proposal_probs
         if M > 1: weights -= torch.logsumexp(weights, dim=0)
         
@@ -162,11 +163,18 @@ def particle_filter(
             ens_ops = ens_ops[samples]
             ens_toks = ens_toks[samples]
             ens_idxs = ens_idxs[samples]
-            ens = (ens_ops, ens_toks, ens_idxs)
             weights = torch.zeros(M).to(device)
+    
+    # pad remaining tokens    
+    i += 1
+    while i < evolver.max_len:
+        ens_ops[:, i, 0] = 1
+        ens_toks[:, i, BOS_TOKEN_ID] = 1
+        ens_idxs[:, i, 0] = 1
+        i += 1
 
     sample = torch.multinomial(torch.exp(weights), 1) if M > 1 else torch.zeros(1, dtype=torch.long)
-    return tuple(map(lambda x: x[sample], ens)), tgt[sample], weights[sample]
+    return ((ens_ops[sample], ens_toks[sample], ens_idxs[sample]), tgt[sample], weights[sample])
 
 def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
     model.eval()

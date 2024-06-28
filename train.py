@@ -7,6 +7,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import wandb
 
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -30,36 +31,8 @@ def log_edits(traj_edit_tgts):
             for edit_tgts in elaborate(traj_edit_tgts)
         ))
     
-def log_memory():
-    if not torch.cuda.is_available(): return
-    peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-    current_memory = torch.cuda.memory_allocated() / 1024**2
-    #logger.info(f'Peak memory: {peak_memory:.2f}MB')
-    logger.info(f'Current memory: {current_memory:.2f}MB')
-    
-def plot_edit_loss(op_losses, tok_losses, idx_losses, prefix='test'):
-    fig, ax = plt.subplots()
-    ax.plot(op_losses, color='red', label='op loss')
-    ax.plot(tok_losses, color='blue', label='tok loss')
-    ax.plot(idx_losses, color='green', label='idx loss')
-    
-    ax.set_xlabel('training step')
-    ax.set_ylabel('per-token xent')
-    ax.legend({'op loss': 'red', 'tok loss': 'blue', 'idx loss': 'green'})
-    
-    plt.tight_layout()
-    plt.savefig(f'figures/{prefix}-loss.png')
-    plt.close(fig)
-    
-def plot_eval_loss(eval_losses, prefix='test'):
-    fig, ax = plt.subplots()
-    ax.plot(eval_losses)
-    ax.set_xlabel('epoch')
-    ax.set_ylabel('per-token approximate ELBO')
-    
-    plt.tight_layout()
-    plt.savefig(f'figures/{prefix}-eval-loss.png')
-    plt.close(fig)
+def get_memory():
+    return torch.cuda.memory_allocated() / 1024**2
     
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
@@ -67,17 +40,8 @@ def train_evolver(
     num_particles, threshold, temperature,
     device, prefix
 ):
-    op_losses = []
-    tok_losses = []
-    idx_losses = []
-    eval_losses = []
-   
-    for step, (batch_ids, maybe_edit_tgts) in enumerate(train_loader):
+    for step, (batch_ids, _) in enumerate(train_loader):
         if step >= train_steps: break
-        logger.info(f'step: {step + 1}')
-       
-        s = time.time() 
-        log_memory()
         
         # E-step
         evolver.eval() 
@@ -94,13 +58,12 @@ def train_evolver(
             optim.step()
             optim.zero_grad()
         
-        logger.info(f'loss: {op_loss + tok_loss + idx_loss}')
-        op_losses.append(op_loss.cpu().item())
-        tok_losses.append(tok_loss.cpu().item())
-        idx_losses.append(idx_loss.cpu().item())
-        logger.info(f'op: {op_losses[-1]}, tok: {tok_losses[-1]}, idx: {idx_losses[-1]}')
-        
-        plot_edit_loss(op_losses, tok_losses, idx_losses, prefix=prefix)
+        wandb.log({
+            "train/op_loss": op_loss,
+            "train/tok_loss": tok_loss,
+            "train/idx_loss": idx_loss,
+            "train/total_loss": op_loss + tok_loss + idx_loss
+        }, step=step)
     
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
@@ -109,47 +72,34 @@ def train_evolver(
             
         if (step + 1) % eval_at == 0:
             s = time.time()
-            avg_eval_loss = evaluate_evolver(evolver, eval_loader, device)
-            logger.info(f'completed eval in {(time.time() - s):.3f} seconds')
-            eval_losses.extend(avg_eval_loss for _ in range(eval_at))
-            logger.info(f'eval loss: {eval_losses[-1]}')
-            plot_eval_loss(eval_losses, prefix=prefix)
+            eval_loss = evaluate_evolver(evolver, eval_loader, device)
+            wandb.log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
 
 @torch.no_grad()
 def evaluate_evolver(evolver, eval_loader, device):
     evolver.eval()
     cur_eval_losses = []
     
-    for _traj_input_ids, _log_posterior in eval_loader:
-        traj_input_ids = _traj_input_ids.squeeze().to(device)
-        log_posterior = _log_posterior.squeeze()
+    for traj_input_ids, log_posterior in eval_loader:
+        traj_input_ids = traj_input_ids.squeeze().to(device)
+        log_posterior = log_posterior.squeeze()
         
-        traj, log_likelihood = sample_trajectory(
+        _, log_likelihood = sample_trajectory(
             evolver, traj_input_ids,
             num_particles=1, threshold=0, temperature=1,
             device=device
         )
         
-        #log_edits(traj)
         num_toks = torch.sum(traj_input_ids[-1] != PAD_TOKEN_ID)
         cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
             
-    return torch.mean(torch.stack(cur_eval_losses)).cpu().item()
+    return torch.mean(torch.stack(cur_eval_losses))
 
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
     device, prefix
 ):
-    fig, axs = plt.subplots(2)
-    axs[0].set_xlabel('train step')
-    axs[0].set_ylabel('nll/token')
-    axs[1].set_xlabel('eval step')
-    axs[1].set_ylabel('nll/token')
-    
-    losses = []
-    eval_losses = []
-    
     for step, (input_ids, output_ids) in enumerate(train_loader):
         if step == train_steps: break
 
@@ -166,10 +116,7 @@ def train_ar(
             optim.step()
             optim.zero_grad()
             
-        losses.append(loss.cpu().item())
-        #logger.info(f'loss: {loss}')
-        axs[0].plot(losses)
-        plt.savefig(f'figures/{prefix}-loss.png')
+        wandb.log({'train/loss': loss}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
@@ -189,20 +136,12 @@ def train_ar(
                     tot_loss += loss
                     tot_n += n
                 
-            eval_losses.append((tot_loss / tot_n).cpu().item())
-            logger.info(f'eval loss: {eval_losses[-1]}')
-            axs[1].plot(eval_losses)
-            plt.savefig(f'figures/{prefix}-loss.png')
-      
-    plt.tight_layout()
-    plt.savefig(f'figures/{prefix}-loss.png')
-    plt.close(fig)
+            wandb.log({'eval/loss': loss}, step=step)
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--device', default='cuda')
-    parser.add_argument('--compile', action='store_true')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
@@ -218,6 +157,12 @@ def main():
     with open(args.config, 'r') as f: config = json.load(f)
     prefix = parse_model_id(args.config)
     print(f'using: {prefix}')
+    
+    wandb.init(
+        project='evolver',
+        name=prefix,
+        config=config
+    )
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         
@@ -269,7 +214,6 @@ def main():
             device=args.device,
             prefix=prefix
         ) 
-       
         
     else:
         evolver = Evolver(
@@ -308,11 +252,6 @@ def main():
             batch_size=1,
             shuffle=True
         )
-
-        if args.compile:
-            logger.info('starting compile')
-            evolver = torch.compile(evolver)
-            logger.info('done')
         
         train_evolver(
             evolver, optim, None,

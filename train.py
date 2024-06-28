@@ -122,7 +122,8 @@ def train_ar(
         if lr_scheduler: 
             lr_scheduler.step()
        
-        wandb.log({'train/loss': loss}, step=step)
+        # wandb.log({'train/loss': loss}, step=step)
+        print(loss)
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
@@ -143,7 +144,7 @@ def train_ar(
                     tot_n += n
                     
             eval_loss = tot_loss / tot_n
-            wandb.log({'eval/loss': eval_loss}, step=step)
+            # wandb.log({'eval/loss': eval_loss}, step=step)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -194,7 +195,7 @@ def main():
             anneal_strategy='cos',
             cycle_momentum=False,
             div_factor=10,
-            final_div=1
+            final_div_factor=1
         )
         
         train_dataset = Seq2SeqDataset.from_trajectories(
@@ -254,7 +255,7 @@ def main():
             anneal_strategy='cos',
             cycle_momentum=False,
             div_factor=10,
-            final_div=1
+            final_div_factor=1
         )
         
         train_dataset = TrajectoryDataset.from_disk(

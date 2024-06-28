@@ -385,24 +385,40 @@ class Transformer(nn.Module):
         if self.encoder_layers == 0 and src is not None:
             raise Exception('src found when encoder_layers == 0')
         
-        memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
-        
-        output = self.decoder(
-            tgt, memory,
-            tgt_is_causal=True,
-            tgt_mask=T.generate_square_subsequent_mask(self.max_len, self.device).eq(-torch.inf),
-            tgt_key_padding_mask=tgt_pad_mask,
-            memory_key_padding_mask=src_pad_mask
+        causal_mask = T.generate_square_subsequent_mask(self.max_len, self.device).eq(-torch.inf)
+       
+        output = self.encoder(
+            src,
+            is_causal=(self.decoder_layers == 0),
+            mask=None if (self.decoder_layers > 0) else causal_mask,
+            src_key_padding_mask=src_pad_mask
         )
         
-        tok_logits = self.tok_head(output)
+        if self.decoder_layers > 0:
+            output = self.decoder(
+                tgt, output,
+                tgt_is_causal=True,
+                tgt_mask=causal_mask,
+                tgt_key_padding_mask=tgt_pad_mask,
+                memory_is_causal=False,
+                memory_mask=None,
+                memory_key_padding_mask=src_pad_mask
+            )
         
-        return tok_logits, memory
+        tok_logits = self.tok_head(output)
+        tok_probs = F.log_softmax(tok_logits, dim=-1)
+        return tok_probs
     
     def loss(self, input_ids, output_ids):
         src, src_pad_mask = self.get_src(input_ids)
-        tgt, tgt_pad_mask = self.get_src(output_ids)
-        tok_logits, *_ = self.forward(src, tgt, src_pad_mask, tgt_pad_mask)
-        tok_probs = F.log_softmax(tok_logits, dim=-1)[:, :-1]
-        labels = F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size)
-        return xent(tok_probs, labels, ignore=self.pad_token_id)
+        
+        if output_ids is None:
+            tok_probs = self.forward(src, None, src_pad_mask, None)
+            labels = F.one_hot(input_ids[:, 1:], num_classes=self.vocab_size)
+        
+        else:
+            tgt, tgt_pad_mask = self.get_src(output_ids)
+            tok_probs = self.forward(src, tgt, src_pad_mask, tgt_pad_mask)
+            labels = F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size)
+       
+        return xent(tok_probs[:, :-1], labels, ignore=self.pad_token_id)

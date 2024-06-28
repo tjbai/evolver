@@ -55,38 +55,6 @@ class PositionalEncoding(nn.Module): # borrowed from huggingface
         x = x + dir * self.pe[:, :x.shape[-2], :]
         return self.dropout(x) if dir > 0 else x
     
-class CausalTransformerDecoder(nn.TransformerDecoder):
-
-    def forward(
-        self,
-        tgt, memory,
-        cache=None,
-        tgt_key_padding_mask=None,
-        memory_key_padding_mask=None,
-    ):
-        x = tgt
-
-        if self.training:
-            for decoder_layer in self.layers:
-                x = decoder_layer(
-                    x, memory,
-                    tgt_key_padding_mask=tgt_key_padding_mask,
-                    memory_key_padding_mask=memory_key_padding_mask,
-                )
-                
-            return x, None
-        
-        new_cache = []
-        for i, decoder_layer in enumerate(self.layers):
-            x = decoder_layer(x, memory)
-            new_cache.append(x)
-            if cache is not None: x = torch.cat([cache[i], x], dim=1)
-            
-        if cache is not None: new_cache = torch.cat([cache, torch.stack(new_cache, dim=0)], dim=2)
-        else: new_cache = torch.stack(new_cache, dim=0)
-
-        return x, new_cache
-
 class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     
     def forward(
@@ -129,6 +97,38 @@ class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
         tgt_last_tok = self.norm3(tgt_last_tok)
         
         return tgt_last_tok
+    
+class CausalTransformerDecoder(nn.TransformerDecoder):
+
+    def forward(
+        self,
+        tgt, memory,
+        cache=None,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+    ):
+        x = tgt
+
+        if self.training:
+            for decoder_layer in self.layers:
+                x = decoder_layer(
+                    x, memory,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                )
+                
+            return x, None
+        
+        new_cache = []
+        for i, decoder_layer in enumerate(self.layers):
+            x = decoder_layer(x, memory)
+            new_cache.append(x)
+            if cache is not None: x = torch.cat([cache[i], x], dim=1)
+            
+        if cache is not None: new_cache = torch.cat([cache, torch.stack(new_cache, dim=0)], dim=2)
+        else: new_cache = torch.stack(new_cache, dim=0)
+
+        return x, new_cache
 
 class Evolver(nn.Module):
     
@@ -328,7 +328,8 @@ class Transformer(nn.Module):
         d_model=512, nhead=8, max_len=10,
         encoder_layers=6, decoder_layers=6,
         dropout=0.1, dim_feedforward=2048,
-        vocab_size=VOCAB_SIZE # NOTE -- dangerous
+        vocab_size=VOCAB_SIZE, # NOTE -- dangerous
+        device='cpu'
     ):
         super().__init__()
         
@@ -336,6 +337,7 @@ class Transformer(nn.Module):
         self.nhead = nhead
         self.max_len = max_len
         self.vocab_size = vocab_size
+        self.device = device
         
         self.pad_token_id = PAD_TOKEN_ID # TODO -- shouldn't have these hardcoded
       
@@ -383,14 +385,18 @@ class Transformer(nn.Module):
         if self.encoder_layers == 0 and src is not None:
             raise Exception('src found when encoder_layers == 0')
         
-        if self.encoder_layers:
-            memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
-            output = self.decoder(tgt, memory, tgt_key_padding_mask=tgt_pad_mask, memory_key_padding_mask=src_pad_mask)
-        else:
-            memory = None
-            output = self.decoder(tgt, None, tgt_key_padding_mask=tgt_pad_mask)
+        memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
+        
+        output = self.decoder(
+            tgt, memory,
+            tgt_is_causal=True,
+            tgt_mask=T.generate_square_subsequent_mask(self.max_len, self.device).eq(-torch.inf),
+            tgt_key_padding_mask=tgt_pad_mask,
+            memory_key_padding_mask=src_pad_mask
+        )
         
         tok_logits = self.tok_head(output)
+        
         return tok_logits, memory
     
     def loss(self, input_ids, output_ids):

@@ -58,7 +58,9 @@ def train_evolver(
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
-        lr_scheduler.step()
+            
+        if lr_scheduler:
+            lr_scheduler.step()
         
         wandb.log({
             "train/op_loss": op_loss,
@@ -116,8 +118,10 @@ def train_ar(
         if (step + 1) % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
-        lr_scheduler.step()
-        
+           
+        if lr_scheduler: 
+            lr_scheduler.step()
+       
         wandb.log({'train/loss': loss}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
@@ -137,8 +141,9 @@ def train_ar(
                     loss, n = model.loss(input_ids, output_ids)
                     tot_loss += loss
                     tot_n += n
-                
-            wandb.log({'eval/loss': loss}, step=step)
+                    
+            eval_loss = tot_loss / tot_n
+            wandb.log({'eval/loss': eval_loss}, step=step)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -175,7 +180,8 @@ def main():
             nhead=config['nhead'],
             max_len=config['max_len'],
             encoder_layers=config['encoder_layers'],
-            decoder_layers=config['decoder_layers']
+            decoder_layers=config['decoder_layers'],
+            device=args.device
         ).to(args.device)
         
         optim = AdamW(model.parameters(), lr=config['lr'])
@@ -290,7 +296,6 @@ def main():
             device=args.device,
             prefix=prefix
         )
-       
 
 if __name__ == '__main__':
     main()

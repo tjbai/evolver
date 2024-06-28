@@ -231,9 +231,9 @@ class Evolver(nn.Module):
         tgt_pad_mask,       # target-side pad token mask (shouldn't matter because of causal decoder)
         memory=None,
         cache=None
-    ): 
+    ):
         if self.training and memory is not None:
-            raise Exception('encoder memory found during training') 
+            raise Exception('encoder memory found during training')
         
         if self.training and cache is not None:
             raise Exception('kv cache found during training')
@@ -254,6 +254,8 @@ class Evolver(nn.Module):
         op_logits = self.op_head(output)
         tok_logits = self.tok_head(output)
         idx_logits = self.idx_head(output)
+        
+        print(op_logits.shape, tok_logits.shape, idx_logits.shape)
         
         return (
             (op_logits, tok_logits, idx_logits),

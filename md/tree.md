@@ -28,3 +28,9 @@ use context length 64 again
 1.0.*: ud_ewt
 2.0.*: ud_gum, sample POS noising
 2.1.*: ud_gum, deterministic noising
+
+evolver is around 3000 (non-pad) tokens for batch size 32, so a single example is on average ~100 tokens
+AR denoising is around 15 tokens per example, on average
+100 / 15 ~= 7 => roughly corresponds to trajectory multiple
+
+ar_bsz * X = evo_bsz * traj * Y => Y / X = ar_bsz / (evo_bsz * traj)

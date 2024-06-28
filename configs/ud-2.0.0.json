@@ -12,8 +12,8 @@
     "train_steps": 1000,
     "batch_size": 64,
     "grad_accum_steps": 1,
-    "checkpoint_at": 1,
-    "eval_at": 200,
+    "checkpoint_at": 50,
+    "eval_at": 50,
     "eval_limit": 250,
 
     "num_particles": 5,

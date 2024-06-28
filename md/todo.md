@@ -1,27 +1,38 @@
-# paper
+# new
+
+[ ] supervised training off the ground
+[ ] baseline AR off the ground
+[ ] tackle Evolver optimizations
+[ ] try pretrained weights in Evolver
+[ ] hyperparam sweep on best dataset
+[ ] collect all results (baseline AR, denoising AR, supervised Evo, particle filter Evo)
+
+# deprecated
+
+## paper
 [ ] __MCEM writeup__
 [ ] research better evaluation methods
 
-# training
+## training
 [ ] __inference__ (modify particle filter)
 [ ] conditional generation
 [ ] validation
 [ ] concatenative training
 
-# experiments
+## experiments
 [ ] match toy distributions
 [ ] __simple sentences with tree-pruning noise__
 [ ] WMT datasets
 
-# completeness / output quality
+## completeness / output quality
 [ ] decoding/MCEM with temperature
 
-# efficiency
+## efficiency
 [ ] disable grad everywhere during eval
 [ ] 1D/2D beam search
 [ ] target-side embedding cache (possibly optional)
 
-# misc/quality of life
+## misc/quality of life
 [ ] __validate on-device (GPU) training__
 [ ] __complete code review__
 [ ] init inference from partial sequence/trajectory

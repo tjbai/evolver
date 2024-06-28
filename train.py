@@ -36,6 +36,10 @@ def log_edits(traj_edit_tgts):
 def get_memory():
     return torch.cuda.memory_allocated() / 1024**2
     
+def log(data, step=None):
+    if wandb.run is not None: wandb.log(data, step=step)
+    else: print(f"Step {step}: {data}")
+
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
@@ -63,7 +67,7 @@ def train_evolver(
         if lr_scheduler:
             lr_scheduler.step()
         
-        wandb.log({
+        log({
             "train/op_loss": op_loss,
             "train/tok_loss": tok_loss,
             "train/idx_loss": idx_loss,
@@ -78,7 +82,7 @@ def train_evolver(
         if (step + 1) % eval_at == 0:
             s = time.time()
             eval_loss = evaluate_evolver(evolver, eval_loader, device)
-            wandb.log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
+            log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
 
 @torch.no_grad()
 def evaluate_evolver(evolver, eval_loader, device):
@@ -123,8 +127,7 @@ def train_ar(
         if lr_scheduler: 
             lr_scheduler.step()
        
-        # wandb.log({'train/loss': loss}, step=step)
-        print(loss)
+        log({'train/loss': loss.item()}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
@@ -145,7 +148,7 @@ def train_ar(
                     tot_n += n
                     
             eval_loss = tot_loss / tot_n
-            # wandb.log({'eval/loss': eval_loss}, step=step)
+            log({'eval/loss': eval_loss.item()}, step=step)
 
 def parse_args():
     parser = argparse.ArgumentParser()

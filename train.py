@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import argparse
+import datetime
 
 import torch
 import torch.nn.functional as F
@@ -164,11 +165,11 @@ def main():
     
     with open(args.config, 'r') as f: config = json.load(f)
     prefix = parse_model_id(args.config)
-    print(f'using: {prefix}')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     wandb.init(
         project='evolver',
-        name=prefix,
+        name=f'{prefix}_{timestamp}',
         config=config
     )
     
@@ -198,7 +199,6 @@ def main():
     )
         
     if prefix.startswith('ar-d'):
-        
         train_dataset = Seq2SeqDataset.from_trajectories(
             path=config['train'],
             denoising=True,
@@ -235,6 +235,9 @@ def main():
             device=args.device,
             prefix=prefix
         ) 
+        
+    elif prefix.startswith('ar'):
+        pass
         
     else:
         train_dataset = TrajectoryDataset.from_disk(

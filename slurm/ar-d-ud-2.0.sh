@@ -6,13 +6,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=8:00:0
-#SBATCH --job-name=ar-d-ud-2.0.0
-#SBATCH --output=ar-d-ud-2.0.0.out
+#SBATCH --job-name=ar-d-ud-2.0
+#SBATCH --output=ar-d-ud-2.0.out
 #SBATCH --mem=80G
 
 ml anaconda
 conda activate evo
 
 python3 train.py \
-    --config configs/ar-d-ud-2.0.0.json \
+    --config configs/ar-d-ud-2.0.json \
     --device cuda

@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import wandb
 
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 from tqdm import tqdm
@@ -52,11 +53,12 @@ def train_evolver(
         evolver.train()
         traj_loss, op_loss, tok_loss, idx_loss = \
             evolver.traj_loss(traj_input_ids, traj_edit_tgts)
-            
         traj_loss.backward()
+        
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
+        lr_scheduler.step()
         
         wandb.log({
             "train/op_loss": op_loss,
@@ -105,7 +107,6 @@ def train_ar(
 
         input_ids = input_ids.to(device)
         output_ids = output_ids.to(device)
-        log_memory()
        
         model.train() 
         tot_loss, n = model.loss(input_ids, output_ids)
@@ -115,7 +116,8 @@ def train_ar(
         if (step + 1) % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
-            
+        lr_scheduler.step()
+        
         wandb.log({'train/loss': loss}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
@@ -166,7 +168,7 @@ def main():
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         
-    if prefix.startswith('ar-d'): # who cares about readable code
+    if prefix.startswith('ar-d'):
         
         model = Transformer(
             d_model=config['d_model'],
@@ -177,6 +179,17 @@ def main():
         ).to(args.device)
         
         optim = AdamW(model.parameters(), lr=config['lr'])
+        
+        lr_scheduler = OneCycleLR(
+            optim,
+            max_lr=config['lr'],
+            total_steps=config['train_steps'],
+            pct_start=config['warmup_percent'],
+            anneal_strategy='cos',
+            cycle_momentum=False,
+            div_factor=10,
+            final_div=1
+        )
         
         train_dataset = Seq2SeqDataset.from_trajectories(
             path=config['train'],
@@ -205,7 +218,7 @@ def main():
         )
 
         train_ar(
-            model, optim, None,
+            model, optim, lr_scheduler,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
             grad_accum_steps=config['grad_accum_steps'],
@@ -226,6 +239,17 @@ def main():
         ).to(args.device)
         
         optim = AdamW(evolver.parameters(), lr=config['lr'])
+        
+        lr_scheduler = OneCycleLR(
+            optim,
+            max_lr=config['lr'],
+            total_steps=config['train_steps'],
+            pct_start=config['warmup_percent'],
+            anneal_strategy='cos',
+            cycle_momentum=False,
+            div_factor=10,
+            final_div=1
+        )
         
         train_dataset = TrajectoryDataset.from_disk(
             path=config['train'],

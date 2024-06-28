@@ -143,6 +143,7 @@ class Evolver(nn.Module):
         self,
         d_model=512, nhead=12, max_len=10,
         encoder_layers=6, decoder_layers=6,
+        dropout=0.1, dim_feedforward=2048,
         vocab_size=VOCAB_SIZE,
         device='cpu'
     ):
@@ -161,10 +162,23 @@ class Evolver(nn.Module):
         self.bos_token_id = BOS_TOKEN_ID # use [CLS] as BOS
         self.eos_token_id = EOS_TOKEN_ID # use [SEP] as EOS
         
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            dim_feedforward=dim_feedforward,
+            batch_first=True
+        )
         
-        decoder_layer = CausalTransformerDecoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        decoder_layer = CausalTransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            dim_feedforward=dim_feedforward,
+            batch_first=True
+        )
+        
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         self.decoder = CausalTransformerDecoder(decoder_layer, num_layers=decoder_layers)
        
         self.op_head = nn.Linear(d_model, 5)
@@ -311,8 +325,10 @@ class Transformer(nn.Module):
     
     def __init__(
         self,
-        d_model=512, nhead=8, max_len=10, vocab_size=VOCAB_SIZE, # NOTE -- dangerous
-        encoder_layers=6, decoder_layers=6
+        d_model=512, nhead=8, max_len=10,
+        encoder_layers=6, decoder_layers=6,
+        dropout=0.1, dim_feedforward=2048,
+        vocab_size=VOCAB_SIZE # NOTE -- dangerous
     ):
         super().__init__()
         
@@ -329,15 +345,27 @@ class Transformer(nn.Module):
         
         self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
       
-        if encoder_layers > 0: 
-            encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
-            self.encoder_layers = encoder_layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            dim_feedforward=dim_feedforward,
+            batch_first=True
+        )
        
         # standard layers so that we can efficiently evaluate perplexity without extra engineering
         # afterwards we can load these weights into the Causal* variants for efficient inference
-        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            dim_feedforward=dim_feedforward,
+            batch_first=True
+        )
+        
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
+        self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
         
     def get_src(self, x):

@@ -3,12 +3,12 @@ import time
 import json
 import logging
 import argparse
-import datetime
+from datetime import datetime
 
+import wandb
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import wandb
 
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR

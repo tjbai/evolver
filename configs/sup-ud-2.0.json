@@ -1,6 +1,6 @@
 {
-    "train": "data/ud/ud_train_2.1.jsonl",
-    "eval": "data/ud/ud_dev_2.1.jsonl",
+    "train": "data/ud/ud_train_2.0.jsonl",
+    "eval": "data/ud/ud_dev_2.0.jsonl",
 
     "d_model": 512,
     "nhead": 8,
@@ -11,11 +11,12 @@
     "decoder_layers": 6,
 
     "lr": 3e-4,
-    "train_steps": 5000,
     "warmup_percent": 0.1,
     "clip_gradients": false,
-    "batch_size": 128,
+    "train_steps": 2000,
+    "eval_steps": 100,
+    "batch_size": 64,
     "grad_accum_steps": 1,
-    "checkpoint_at": 200,
-    "eval_at": 200
+    "checkpoint_at": 50,
+    "eval_at": 50
 }

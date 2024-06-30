@@ -295,7 +295,6 @@ class Evolver(nn.Module):
 
     def traj_loss(self, traj_input_ids, traj_edit_tgts):
         traj_op_tot = traj_tok_tot = traj_idx_tot = 0 
-        
         traj_src, traj_pad_mask = self.get_src(traj_input_ids)
         src = traj_src[:, 0, :]
         

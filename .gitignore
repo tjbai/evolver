@@ -7,3 +7,5 @@ __pycache__
 **.swp
 **.out
 wandb
+*_CHECKPOINT
+media

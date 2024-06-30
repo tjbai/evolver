@@ -199,6 +199,8 @@ def to_str(op, tok, idx, prev_toks=None, tokenizer=None):
     if tok and idx: return f'SUB({tok_str}, {idx_str})'
     elif tok: return f'INS({tok_str})'
     elif idx: return f'CPY({idx_str})'
+    
+    raise Exception(f'illegal to_str case: {op} {tok} {idx}')
 
 def elaborate(traj_edit_tgts, batch_first=True):
     if len(traj_edit_tgts[0].shape) == 3: traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(1), traj_edit_tgts))

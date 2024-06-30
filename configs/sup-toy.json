@@ -18,10 +18,5 @@
     "batch_size": 1,
     "grad_accum_steps": 1,
     "checkpoint_at": 1e9,
-    "eval_at": 10,
-
-    "num_particles": 3,
-    "threshold": 1,
-    "temperature": 1,
-    "resample_at": 1
+    "eval_at": 10
 }

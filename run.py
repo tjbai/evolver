@@ -129,7 +129,7 @@ def particle_filter(
             (ens_ops, ens_toks, ens_idxs)
         ))
         
-        edit_probs, tgt, memory, cache = evolver.forward(
+        edit_probs, _, memory, cache = evolver.forward(
             batch_ids.view(B*M, N),
             src.view(B*M, N, -1), ens,
             src_pad_mask.view(B*M, N),

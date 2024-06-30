@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
    
 def log_edits(traj_edit_tgts):
-    logger.debug(
+    logger.info(
         '\n' + 
         '\n'.join(
             ' '.join([e.ljust(8) for e in edit_tgts])
@@ -49,13 +49,15 @@ def train_evolver(
         
         # E-step
         evolver.eval() 
-        traj_edit_tgts, _ = \
-            sample_trajectory(evolver, traj_input_ids, num_particles, threshold, temperature, resample_at)
-        
+        traj_edit_tgts, _ = sample_trajectory(
+            evolver, traj_input_ids,
+            num_particles, threshold, temperature, resample_at
+        )
+        logger.info(f'step {step}: {elaborate(traj_edit_tgts)}')
+            
         # M-step
         evolver.train()
-        traj_loss, op_loss, tok_loss, idx_loss = \
-            evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+        traj_loss, op_loss, tok_loss, idx_loss = evolver.traj_loss(traj_input_ids, traj_edit_tgts)
         traj_loss.backward()
         
         if step % grad_accum_steps == 0:
@@ -150,6 +152,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--local', action='store_true')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
@@ -165,12 +168,13 @@ def main():
     with open(args.config, 'r') as f: config = json.load(f)
     prefix = parse_model_id(args.config)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    wandb.init(
-        project='evolver',
-        name=f'{prefix}_{timestamp}',
-        config=config
-    )
+   
+    if not args.local:
+        wandb.init(
+            project='evolver',
+            name=f'{prefix}_{timestamp}',
+            config=config
+        )
     
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     
@@ -256,13 +260,13 @@ def main():
             path=config['eval'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-            limit=config['eval_limit']
         )
         
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=1,
-            shuffle=True
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
+            collate_fn=collate_traj
         )
         
         train_evolver(

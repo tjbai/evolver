@@ -18,10 +18,8 @@
     "grad_accum_steps": 1,
     "checkpoint_at": 50,
     "eval_at": 50,
-    "eval_limit": 250,
 
     "num_particles": 5,
     "threshold": 2,
-    "temperature": 1,
-    "eval_samples": 1
+    "temperature": 1
 }

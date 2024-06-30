@@ -199,8 +199,8 @@ class Evolver(nn.Module):
         memory = self.positional_encoding(memory, dir=-1)
         
         # permuted[i, j, :] = prev[i, idx_ids[i, j], :]
-        permuted_memory = memory[torch.arange(B).unsqueeze(1).to(self.device), idx_ids]
-        permuted_input_ids = input_ids[torch.arange(B).unsqueeze(1).to(self.device), idx_ids]
+        permuted_memory = memory[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
+        permuted_input_ids = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
         
         # INS: add new embeddings
         ins_mask = op_ids.eq(INS_ID)
@@ -223,7 +223,7 @@ class Evolver(nn.Module):
         
         # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
-        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id).to(self.device))
+        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id, device=self.device))
         
         # add new positional encodings 
         tgt = self.positional_encoding(tgt, dir=1)
@@ -280,18 +280,15 @@ class Evolver(nn.Module):
         idx_logits[pad_mask.unsqueeze(1).expand_as(idx_logits)] = -1e9
         return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
     
-    def loss(self, edit_probs, edit_tgts, pad_mask):
+    def loss(self, edit_probs, edit_tgts):
         op_tgts, tok_tgts, idx_tgts = tuple(map(lambda x: x[:, 1:, :], edit_tgts))
-        assert op_tgts.shape[1] == self.max_len - 1
-        
         op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1, :], edit_probs))
-        assert op_tgts.shape[1] == self.max_len - 1
         
         op_tot, op_n = xent(op_probs, op_tgts, ignore=PAD_ID)
         tok_tot, tok_n = xent(tok_probs, tok_tgts, ignore=PAD_TOKEN_ID)
         idx_tot, idx_n = xent(idx_probs, idx_tgts, ignore=0)
         
-        return (op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n)
+        return op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n
 
     def traj_loss(self, traj_input_ids, traj_edit_tgts):
         traj_op_tot = traj_tok_tot = traj_idx_tot = 0 
@@ -308,7 +305,7 @@ class Evolver(nn.Module):
             edit_tgts = tuple(map(lambda x: x[:, i], traj_edit_tgts))
             
             edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
-            op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts, src_pad_mask)
+            op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
             
             traj_loss += (op_tot / op_n) + (tok_tot / tok_n) + (idx_tot / idx_n)
             traj_op_tot += op_tot

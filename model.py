@@ -270,7 +270,7 @@ class Evolver(nn.Module):
         idx_logits = self.idx_head(output)
         
         return (
-            (op_logits, tok_logits, idx_logits),
+            self.get_probs((op_logits, tok_logits, idx_logits), src_pad_mask),
             tgt, memory, new_cache
         )
    
@@ -280,11 +280,10 @@ class Evolver(nn.Module):
         idx_logits[pad_mask.unsqueeze(1).expand_as(idx_logits)] = -1e9
         return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
     
-    def loss(self, edit_logits, edit_tgts, pad_mask):
+    def loss(self, edit_probs, edit_tgts, pad_mask):
         op_tgts, tok_tgts, idx_tgts = tuple(map(lambda x: x[:, 1:, :], edit_tgts))
         assert op_tgts.shape[1] == self.max_len - 1
         
-        edit_probs = self.get_probs(edit_logits, pad_mask)
         op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1, :], edit_probs))
         assert op_tgts.shape[1] == self.max_len - 1
         
@@ -307,10 +306,10 @@ class Evolver(nn.Module):
             input_ids = traj_input_ids[:, i, :]
             src_pad_mask = traj_pad_mask[:, i, :]
             tgt_pad_mask = traj_pad_mask[:, i+1, :]
-            edit_tgts = tuple(map(lambda x: x[:, i, :], traj_edit_tgts))
+            edit_tgts = tuple(map(lambda x: x[:, i], traj_edit_tgts))
             
-            edit_logits, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
-            op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_logits, edit_tgts, src_pad_mask)
+            edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
+            op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts, src_pad_mask)
             
             traj_loss += (op_tot / op_n) + (tok_tot / tok_n) + (idx_tot / idx_n)
             traj_op_tot += op_tot

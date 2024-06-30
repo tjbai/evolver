@@ -1,15 +1,11 @@
 import os
 import logging
-import argparse
-import numpy as np
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
-from torch.profiler import profile, record_function, ProfilerActivity
 
 from data import (
-    get_align_ids,
     get_edit_tgts,
     get_input_ids,
     pad_traj_input_ids,
@@ -19,154 +15,196 @@ from data import (
 from dep import noise
 
 from constants import (
-    PAD_TOKEN_ID, EOS_TOKEN_ID,
-    INS_ID, CPY_ID, SUB_ID, EOS_ID, INS_BOS,
-    VOCAB_SIZE
+    BOS_TOKEN_ID, PAD_TOKEN_ID, EOS_TOKEN_ID,
+    PAD_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID,
+    INS_BOS, VOCAB_SIZE
 )
 
 logging.basicConfig()
 logger = logging.getLogger('train')
 logger.setLevel(logging.DEBUG if ('DEBUG' in os.environ) else logging.INFO)
 
-@torch.no_grad()
-def sample_batch(
-    evolver, batch_ids,
-    num_particles, threshold, temperature,
-    device
-):
-    traj_input_ids = []
-    traj_edit_tgts = tuple([] for _ in range(3))
-    T = max(input_ids.shape[0] for input_ids in batch_ids)
-    
-    for input_ids in tqdm(batch_ids):
-        input_ids = input_ids.to(device)
-       
-        cur_tgts, _ = sample_trajectory(
-            evolver, input_ids,
-            num_particles, threshold, temperature,
-            device
-        )
-
-        input_ids = pad_traj_input_ids(input_ids, T)
-        cur_tgts = pad_traj_edit_tgts(cur_tgts, T-1)
-        
-        traj_input_ids.append(input_ids)
-        for i in range(3): traj_edit_tgts[i].append(cur_tgts[i])
-    
-    traj_input_ids = torch.stack(traj_input_ids).to(device)
-    traj_edit_tgts = tuple(map(lambda x: torch.stack(x).to(device), traj_edit_tgts))
-    
-    return traj_input_ids, traj_edit_tgts
-
-@torch.no_grad()
 def sample_trajectory(
     evolver, traj_input_ids,
-    num_particles, threshold, temperature,
-    device='cuda'
+    num_particles, threshold, temperature, resample_at
 ):
-    T = len(traj_input_ids)
+    B, T, N = traj_input_ids.shape
+    device = traj_input_ids.device
     
     traj_src, traj_pad_mask = evolver.get_src(traj_input_ids)
-    src = traj_src[0]
-  
-    log_traj_prob = 0
-    traj_edit_tgts = tuple([] for _ in range(3))
+    src = traj_src[:, 0]
     
+    traj_log_prob = torch.zeros(B, device=device)
+    traj_op_tgts = torch.zeros(B, T-1, N, 5, device=device)
+    traj_tok_tgts = torch.zeros(B, T-1, N, VOCAB_SIZE, device=device)
+    traj_idx_tgts = torch.zeros(B, T-1, N, N, device=device)
+
     for i in range(T-1):
         edit_tgts, src, log_prob = particle_filter(
-            evolver, traj_input_ids[i], traj_input_ids[i+1],
-            src, traj_pad_mask[i], traj_pad_mask[i+1],
-            num_particles, threshold, temperature,
-            device
+            evolver, traj_input_ids[:, i], traj_input_ids[:, i+1],
+            src, traj_pad_mask[:, i, :], traj_pad_mask[:, i+1, :],
+            num_particles, threshold, temperature, resample_at
         )
+        
+        traj_log_prob += log_prob
+        traj_op_tgts[:, i] = edit_tgts[0]
+        traj_tok_tgts[:, i] = edit_tgts[1]
+        traj_idx_tgts[:, i] = edit_tgts[2]
+        
+    return (traj_op_tgts, traj_tok_tgts, traj_idx_tgts), traj_log_prob
 
-        # ugly, but we short-circuit the particle filter after EOS so we need this input to be padded again
-        src = torch.cat([src, torch.zeros(src.shape[0], evolver.max_len-src.shape[1], evolver.d_model).to(device)], dim=1)
-        for i in range(3): traj_edit_tgts[i].append(edit_tgts[i])
-        log_traj_prob += log_prob
+def get_align_ids(input_ids, output_ids):
+    B, N = input_ids.shape
+    device = input_ids.device
     
-    return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob
+    op_ids = torch.full((B, N, N*2+1), PAD_ID, dtype=torch.long, device=device)
+    tok_ids = torch.full((B, N, N*2+1), PAD_TOKEN_ID, dtype=torch.long, device=device)
+    idx_ids = torch.full((B, N, N*2+1), 0, dtype=torch.long, device=device)
+    
+    op_ids[:, :, 0] = INS_ID
+    op_ids[:, :, 1:N+1] = CPY_ID
+    op_ids[:, :, N+1:] = SUB_ID
+    
+    tok_ids[:, :, 0] = output_ids
+    tok_ids[:, :, N+1:] = output_ids.unsqueeze(-1).expand(-1, -1, N)
+    
+    idx_range = torch.arange(N, device=device)
+    idx_ids[:, :, 1:N+1] = idx_range.expand(B, N, -1)
+    idx_ids[:, :, N+1:] = idx_range.expand(B, N, -1)
+    
+    return op_ids, tok_ids, idx_ids
+
+def maybe_resample(weights, threshold, M):
+    B = weights.shape[0]
+    device = weights.device
+    
+    ess = 1 / torch.sum(torch.exp(weights)**2, dim=-1)
+    resample_mask = ess <= threshold
+    
+    indices = torch.arange(M, device=device).unsqueeze(0).expand(B, -1)
+    samples = torch.multinomial(torch.exp(weights), M, replacement=True)
+    samples = torch.where(resample_mask.unsqueeze(1), samples, indices)
+    
+    return samples, resample_mask
 
 @torch.no_grad()
 def particle_filter(
-    evolver, input_ids, output_ids,
-    src, src_pad_mask, tgt_pad_mask,
-    M, threshold, temperature=1.0,
-    device='cuda'
+    evolver,
+    input_ids,    # BxN
+    output_ids,   # BxN
+    src,          # BxNxD 
+    src_pad_mask, # BxN
+    tgt_pad_mask, # BxN
+    M, threshold,
+    temperature,
+    resample_at
 ):
-    # repeat along batch (ensemble)
-    src = src.repeat(M, 1, 1)
-    src_pad_mask = src_pad_mask.repeat(M, 1)
-    tgt_pad_mask = tgt_pad_mask.repeat(M, 1)
+    B, N = input_ids.shape
+    device = input_ids.device
     
-    # initialize particles and weights 
-    weights = torch.zeros(M).to(device)
-    _ens = get_edit_tgts([INS_BOS], evolver.max_len)
-    ens = tuple(map(lambda x: x.unsqueeze(0).repeat(M, 1, 1).to(device), _ens))
-    ens_ops, ens_toks, ens_idxs = ens
+    batch_ids = input_ids.unsqueeze(1).repeat(1, M, 1)       # BxMxN
+    src = src.unsqueeze(1).repeat(1, M, 1, 1)                # BxMxNxD
+    src_pad_mask = src_pad_mask.unsqueeze(1).repeat(1, M, 1) # BxMxN
+    tgt_pad_mask = tgt_pad_mask.unsqueeze(1).repeat(1, M, 1) # BxMxN
    
-    # precompute edit ids
-    op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids)
+    weights = torch.zeros(B, M, device=device)                                   # BxM
+    ens_ops = torch.zeros(B, M, N, 5, dtype=torch.long, device=device)           # BxMxNx5
+    ens_toks = torch.zeros(B, M, N, VOCAB_SIZE, dtype=torch.long, device=device) # BxMxNxV
+    ens_idxs = torch.zeros(B, M, N, N, dtype=torch.long, device=device)          # BxMxNxN
     
-    cache = None
-    memory = None
-    for i, forced in enumerate(output_ids[1:], start=1):
-        # forward pass 
-        edit_logits, tgt, memory, cache = evolver.forward(
-            input_ids, src,
-            tuple(map(lambda x: x[:, :i, :], ens)),
-            src_pad_mask, tgt_pad_mask,
+    # initialize BOS
+    ens_ops[:, :, 0, INS_ID] = 1
+    ens_toks[:, :, 0, BOS_TOKEN_ID] = 1
+    ens_idxs[:, :, 0, 0] = 1
+    
+    op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids) # BxNx(2N+1) each
+   
+    memory = cache = None 
+    for i in range(1, N):
+        forced = output_ids[:, i]
+     
+        # BxMxIx_ -> BMxIx_ 
+        ens = tuple(map(
+            lambda x: x.view(B*M, N, -1)[:, :i, :],
+            (ens_ops, ens_toks, ens_idxs)
+        ))
+        
+        edit_probs, tgt, memory, cache = evolver.forward(
+            batch_ids.view(B*M, N),
+            src.view(B*M, N, -1), ens,
+            src_pad_mask.view(B*M, N),
+            tgt_pad_mask.view(B*M, N),
             memory, cache
         )
         
-        # get logits 
-        op_probs, tok_probs, idx_probs = evolver.get_probs(edit_logits, src_pad_mask)
-        
-        # handle EOS
-        if forced == EOS_TOKEN_ID:
-            eos = op_probs[:, -1, EOS_ID]
-            ens_ops[:, i, :] = F.one_hot(torch.tensor(EOS_ID), 5).repeat(M, 1)
-            ens_toks[:, i, :] = F.one_hot(torch.tensor(PAD_TOKEN_ID), VOCAB_SIZE).repeat(M, 1)
-            ens_idxs[:, i, :] = F.one_hot(torch.tensor(0), evolver.max_len).repeat(M, 1)
-            weights += eos
-            if M > 1: weights -= torch.logsumexp(weights, dim=0)
-            break
-    
-        # compute proposal weights
-        ins = op_probs[:, -1, INS_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1)
-        cpy = op_probs[:, -1, CPY_ID].unsqueeze(1) + idx_probs[:, -1, input_ids.eq(forced)]
-        sub = op_probs[:, -1, SUB_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1) + idx_probs[:, -1, :]
+        # BMxIx_ -> BxMxIx_
+        op_probs, tok_probs, idx_probs = tuple(map(
+            lambda x: x.view(B, M, i, -1),
+            edit_probs
+        ))
+      
+        # basically just black magic
+        posterior = torch.full((B, M, N*2+1), -1e9, device=device)
+        posterior[:, :, 0] = op_probs[:, :, -1, INS_ID] + tok_probs[torch.arange(B, device=device), :, -1, forced]
+        cpy_mask = input_ids.eq(forced.unsqueeze(1)).unsqueeze(1).expand(B, M, N)
+        posterior[:, :, 1:N+1][cpy_mask] = (op_probs[:, :, -1, CPY_ID].unsqueeze(-1) + idx_probs[:, :, -1, :])[cpy_mask]
+        posterior[:, :, N+1:] = op_probs[:, :, -1, SUB_ID].unsqueeze(-1) + tok_probs[torch.arange(B), :, -1, forced].unsqueeze(-1) + idx_probs[:, :, -1, :]
         
         # normalize proposal and sample
-        logits = torch.cat([ins, cpy, sub], dim=1)
-        posterior = logits
-        proposal = F.log_softmax(logits / temperature, dim=1)
-        next = torch.multinomial(torch.exp(proposal), 1).squeeze(1)
+        proposal = F.log_softmax(posterior / temperature, dim=-1)
+        samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
+        posterior_probs = torch.gather(posterior.view(B*M, -1), dim=-1, index=samples)
+        proposal_probs = torch.gather(proposal.view(B*M, -1), dim=-1, index=samples)
         
-        # update particles
-        ens_ops[:, i, :] = F.one_hot(op_ids[i].to(device)[next], 5)
-        ens_toks[:, i, :] = F.one_hot(tok_ids[i].to(device)[next], VOCAB_SIZE)
-        ens_idxs[:, i, :] = F.one_hot(idx_ids[i].to(device)[next], evolver.max_len)
+        # update particles and weights
+        samples = samples.view(B, M)
+        posterior_probs = posterior_probs.view(B, M)
+        proposal_probs = proposal_probs.view(B, M)
+        sample_weight = posterior_probs - proposal_probs
         
-        # update weights
-        posterior_probs = torch.gather(posterior, dim=1, index=next.unsqueeze(1)).squeeze()
-        proposal_probs = torch.gather(proposal, dim=1, index=next.unsqueeze(1)).squeeze()
+        # C[i, j] = one_hot(B[i, A[i, j]]])
+        fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=A.device).unsqueeze(1).expand_as(A), A], num_classes=D)
         
-        weights += posterior_probs - proposal_probs
-        if M > 1: weights -= torch.logsumexp(weights, dim=0)
+        update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))
+        ens_ops[update, :, i, :] = fn(samples, op_ids[:, i, :], 5)[update]
+        ens_toks[update, :, i, :] = fn(samples, tok_ids[:, i, :], VOCAB_SIZE)[update]
+        ens_idxs[update, :, i, :] = fn(samples, idx_ids[:, i, :], N)[update]
+        weights[update] += sample_weight[update]
         
+        eos = forced.eq(EOS_TOKEN_ID)
+        ens_ops[eos, :, i, EOS_ID] = 1
+        ens_toks[eos, :, i, PAD_TOKEN_ID] = 1
+        ens_idxs[eos, :, i, 0] = 1
+        weights[eos] += op_probs[eos, :, -1, EOS_ID]
+        
+        pad = forced.eq(PAD_TOKEN_ID)
+        ens_ops[pad, :, i, PAD_ID] = 1
+        ens_toks[pad, :, i, PAD_TOKEN_ID] = 1
+        ens_idxs[pad, :, i, 0] = 1
+        
+        if M == 1: continue
+        
+        # normalize weights
+        normalize = ~forced.eq(PAD_TOKEN_ID)
+        weights[normalize] -= torch.logsumexp(weights[normalize], dim=-1, keepdim=True)
+       
         # maybe resample
-        ess = 1 / torch.sum(torch.exp(weights)**2)
-        if ess <= threshold and M > 1:
-            samples = torch.multinomial(torch.exp(weights), M, replacement=True)
-            ens_ops = ens_ops[samples]
-            ens_toks = ens_toks[samples]
-            ens_idxs = ens_idxs[samples]
-            ens = (ens_ops, ens_toks, ens_idxs)
-            weights = torch.zeros(M).to(device)
-
-    sample = torch.multinomial(torch.exp(weights), 1) if M > 1 else torch.zeros(1, dtype=torch.long)
-    return tuple(map(lambda x: x[sample], ens)), tgt[sample], weights[sample]
+        if i % resample_at == 0:
+            samples, resample_mask = maybe_resample(weights, threshold, M)
+            ens_ops = ens_ops[torch.arange(B).unsqueeze(1), samples]
+            ens_toks = ens_toks[torch.arange(B).unsqueeze(1), samples]
+            ens_idxs = ens_idxs[torch.arange(B).unsqueeze(1), samples]
+            weights[resample_mask] = 0
+  
+    # sampled edit targets for each ensemble
+    samples = torch.multinomial(torch.exp(weights), 1).squeeze() if M > 1 else torch.zeros(B, dtype=torch.long)
+    edit_tgts = tuple(map(lambda x: x[torch.arange(B, device=device), samples], (ens_ops, ens_toks, ens_idxs)))
+    
+    # next step source-side embeddings
+    memory = memory.view(B, M, N, -1)[:, 0, :, :]
+    src = evolver.compute_tgt(input_ids, memory, edit_tgts)
+    
+    return edit_tgts, src, weights[torch.arange(B, device=device), samples]
 
 def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
     model.eval()
@@ -231,16 +269,6 @@ def apply_edits(input_ids, edits):
     
     return res
    
-def parse_args():
-    parser = argparse.ArgumentParser()
-    return parser.parse_args()
-
-def main():
-    pass
-
-if __name__ == '__main__':
-    main()
-
 ### deprecated utilities
 
 def decode_stochastic(edit_probs):
@@ -303,3 +331,146 @@ def decode(
         raise NotImplementedError()
         
     return edit_tgts, tgt
+
+### to deprecate
+
+@torch.no_grad()
+def _particle_filter(
+    evolver, input_ids, output_ids,
+    src, src_pad_mask, tgt_pad_mask,
+    M, threshold, temperature=1.0,
+    device='cuda'
+):
+    # repeat along batch (ensemble)
+    src = src.repeat(M, 1, 1)
+    src_pad_mask = src_pad_mask.repeat(M, 1)
+    tgt_pad_mask = tgt_pad_mask.repeat(M, 1)
+    
+    # initialize particles and weights 
+    weights = torch.zeros(M).to(device)
+    _ens = get_edit_tgts([INS_BOS], evolver.max_len)
+    ens = tuple(map(lambda x: x.unsqueeze(0).repeat(M, 1, 1).to(device), _ens))
+    ens_ops, ens_toks, ens_idxs = ens
+   
+    # precompute edit ids
+    op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids)
+    
+    cache = None
+    memory = None
+    for i, forced in enumerate(output_ids[1:], start=1):
+        # forward pass 
+        edit_probs, tgt, memory, cache = evolver.forward(
+            input_ids, src,
+            tuple(map(lambda x: x[:, :i, :], ens)),
+            src_pad_mask, tgt_pad_mask,
+            memory, cache
+        )
+        
+        # get logits 
+        op_probs, tok_probs, idx_probs = edit_probs
+        
+        # handle EOS
+        if forced == EOS_TOKEN_ID:
+            eos = op_probs[:, -1, EOS_ID]
+            ens_ops[:, i, :] = F.one_hot(torch.tensor(EOS_ID), 5).repeat(M, 1)
+            ens_toks[:, i, :] = F.one_hot(torch.tensor(PAD_TOKEN_ID), VOCAB_SIZE).repeat(M, 1)
+            ens_idxs[:, i, :] = F.one_hot(torch.tensor(0), evolver.max_len).repeat(M, 1)
+            weights += eos
+            if M > 1: weights -= torch.logsumexp(weights, dim=0)
+            break
+    
+        # compute proposal weights
+        ins = op_probs[:, -1, INS_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1)
+        cpy = op_probs[:, -1, CPY_ID].unsqueeze(1) + idx_probs[:, -1, input_ids.eq(forced)]
+        sub = op_probs[:, -1, SUB_ID].unsqueeze(1) + tok_probs[:, -1, forced].unsqueeze(1) + idx_probs[:, -1, :]
+        
+        # normalize proposal and sample
+        logits = torch.cat([ins, cpy, sub], dim=1)
+        posterior = logits
+        proposal = F.log_softmax(logits / temperature, dim=1)
+        next = torch.multinomial(torch.exp(proposal), 1).squeeze(1)
+        
+        # update particles
+        ens_ops[:, i, :] = F.one_hot(op_ids[i].to(device)[next], 5)
+        ens_toks[:, i, :] = F.one_hot(tok_ids[i].to(device)[next], VOCAB_SIZE)
+        ens_idxs[:, i, :] = F.one_hot(idx_ids[i].to(device)[next], evolver.max_len)
+        
+        # update weights
+        posterior_probs = torch.gather(posterior, dim=1, index=next.unsqueeze(1)).squeeze()
+        proposal_probs = torch.gather(proposal, dim=1, index=next.unsqueeze(1)).squeeze()
+        
+        weights += posterior_probs - proposal_probs
+        if M > 1: weights -= torch.logsumexp(weights, dim=0)
+        
+        # maybe resample
+        ess = 1 / torch.sum(torch.exp(weights)**2)
+        if ess <= threshold and M > 1:
+            samples = torch.multinomial(torch.exp(weights), M, replacement=True)
+            ens_ops = ens_ops[samples]
+            ens_toks = ens_toks[samples]
+            ens_idxs = ens_idxs[samples]
+            ens = (ens_ops, ens_toks, ens_idxs)
+            weights = torch.zeros(M).to(device)
+
+    sample = torch.multinomial(torch.exp(weights), 1) if M > 1 else torch.zeros(1, dtype=torch.long)
+    return tuple(map(lambda x: x[sample], ens)), tgt[sample], weights[sample]
+
+@torch.no_grad()
+def _sample_batch(
+    evolver, batch_ids,
+    num_particles, threshold, temperature,
+    device
+):
+    traj_input_ids = []
+    traj_edit_tgts = tuple([] for _ in range(3))
+    T = max(input_ids.shape[0] for input_ids in batch_ids)
+    
+    for input_ids in tqdm(batch_ids):
+        input_ids = input_ids.to(device)
+       
+        cur_tgts, _ = sample_trajectory(
+            evolver, input_ids,
+            num_particles, threshold, temperature,
+            device
+        )
+
+        input_ids = pad_traj_input_ids(input_ids, T)
+        cur_tgts = pad_traj_edit_tgts(cur_tgts, T-1)
+        
+        traj_input_ids.append(input_ids)
+        for i in range(3): traj_edit_tgts[i].append(cur_tgts[i])
+    
+    traj_input_ids = torch.stack(traj_input_ids).to(device)
+    traj_edit_tgts = tuple(map(lambda x: torch.stack(x).to(device), traj_edit_tgts))
+    
+    return traj_input_ids, traj_edit_tgts
+
+@torch.no_grad()
+def _sample_trajectory(
+    evolver, traj_input_ids,
+    num_particles, threshold, temperature,
+    device='cuda'
+):
+    T = len(traj_input_ids)
+    
+    traj_src, traj_pad_mask = evolver.get_src(traj_input_ids)
+    src = traj_src[0]
+  
+    log_traj_prob = 0
+    traj_edit_tgts = tuple([] for _ in range(3))
+    
+    for i in range(T-1):
+        edit_tgts, src, log_prob = particle_filter(
+            evolver, traj_input_ids[i], traj_input_ids[i+1],
+            src, traj_pad_mask[i], traj_pad_mask[i+1],
+            num_particles, threshold, temperature,
+            device
+        )
+
+        # ugly, but we short-circuit the particle filter after EOS so we need this input to be padded again
+        pad = torch.zeros(src.shape[0], evolver.max_len-src.shape[1], evolver.d_model, device=device)
+        src = torch.cat([src, pad], dim=1)
+        for i in range(3): traj_edit_tgts[i].append(edit_tgts[i])
+        log_traj_prob += log_prob
+    
+    return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob

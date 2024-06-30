@@ -8,18 +8,16 @@ from datetime import datetime
 import wandb
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from transformers import BertTokenizer
-from tqdm import tqdm
 
 from constants import PAD_TOKEN_ID
-from data import elaborate, TrajectoryDataset, Seq2SeqDataset, StratifiedInfiniteSampler
+from data import elaborate, collate_traj, TrajectoryDataset, Seq2SeqDataset, StratifiedInfiniteSampler
 from model import Evolver, Transformer
-from run import sample_trajectory, sample_batch
+from run import sample_trajectory
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -42,17 +40,17 @@ def log(data, step=None):
 
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
-    train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    num_particles, threshold, temperature,
+    train_steps, eval_steps, grad_accum_steps, checkpoint_at, eval_at,
+    num_particles, threshold, temperature, resample_at,
     device, prefix
 ):
-    for step, (batch_ids, _) in enumerate(train_loader):
+    for step, (traj_input_ids, _) in enumerate(train_loader):
         if step >= train_steps: break
         
         # E-step
         evolver.eval() 
-        traj_input_ids, traj_edit_tgts = \
-            sample_batch(evolver, batch_ids, num_particles, threshold, temperature, device)
+        traj_edit_tgts, _ = \
+            sample_trajectory(evolver, traj_input_ids, num_particles, threshold, temperature, resample_at)
         
         # M-step
         evolver.train()
@@ -68,12 +66,12 @@ def train_evolver(
             lr_scheduler.step()
         
         log({
+            "train/total_loss": op_loss + tok_loss + idx_loss,
             "train/op_loss": op_loss,
             "train/tok_loss": tok_loss,
-            "train/idx_loss": idx_loss,
-            "train/total_loss": op_loss + tok_loss + idx_loss
+            "train/idx_loss": idx_loss
         }, step=step)
-    
+        
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
             torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
@@ -81,27 +79,25 @@ def train_evolver(
             
         if (step + 1) % eval_at == 0:
             s = time.time()
-            eval_loss = evaluate_evolver(evolver, eval_loader, device)
+            eval_loss = evaluate_evolver(evolver, eval_loader, eval_steps, device)
             log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
 
 @torch.no_grad()
-def evaluate_evolver(evolver, eval_loader, device):
+def evaluate_evolver(evolver, eval_loader, eval_steps, device):
     evolver.eval()
     cur_eval_losses = []
     
-    for traj_input_ids, log_posterior in eval_loader:
-        traj_input_ids = traj_input_ids.squeeze().to(device)
-        log_posterior = log_posterior.squeeze()
+    for step, (traj_input_ids, log_posterior) in enumerate(eval_loader):
+        if step >= eval_steps: break
         
         _, log_likelihood = sample_trajectory(
-            evolver, traj_input_ids,
-            num_particles=1, threshold=0, temperature=1,
-            device=device
+            evolver, traj_input_ids.to(device),
+            num_particles=1, threshold=0, temperature=1, resample_at=1e9
         )
         
-        num_toks = torch.sum(traj_input_ids[-1] != PAD_TOKEN_ID)
-        cur_eval_losses.append((log_likelihood - log_posterior) / num_toks)
-            
+        num_toks = torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
+        cur_eval_losses.append(torch.sum(log_likelihood - log_posterior) / num_toks)
+        
     return torch.mean(torch.stack(cur_eval_losses))
 
 def train_ar(
@@ -253,7 +249,7 @@ def main():
             train_dataset,
             batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=lambda x: zip(*x) # don't worry about it
+            collate_fn=collate_traj
         )
         
         eval_dataset = TrajectoryDataset.from_disk(
@@ -273,12 +269,14 @@ def main():
             model, optim, None,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
+            eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             num_particles=config['num_particles'],
             threshold=config['threshold'],
             temperature=config['temperature'],
+            resample_at=config['resample_at'],
             device=args.device,
             prefix=prefix
         )

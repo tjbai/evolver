@@ -24,45 +24,16 @@ from constants import (
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-def get_align_ids(input_ids, output_ids):
-    N = input_ids.shape[0]
-    op_ids, tok_ids, idx_ids = ([], [], [])
-
-    for forced in output_ids:
-        C = torch.sum(input_ids.eq(forced))
-        
-        op_ids.append(torch.cat([
-            torch.tensor([INS_ID]),
-            torch.tensor([CPY_ID]).repeat(C),
-            torch.tensor([SUB_ID]).repeat(N)
-        ]))
-        
-        tok_ids.append(torch.cat([
-            torch.tensor([forced]),
-            torch.tensor([PAD_TOKEN_ID]).repeat(C),
-            torch.tensor([forced]).repeat(N)
-        ]))
-        
-        idx_ids.append(torch.cat([
-            torch.tensor([0]),
-            torch.arange(N)[input_ids.eq(forced).to('cpu')],
-            torch.arange(N)
-        ]))
-        
-    return op_ids, tok_ids, idx_ids
-
     
 def pad_traj_input_ids(traj_input_ids, T):
-    t, max_len = traj_input_ids.shape
+    t, N = traj_input_ids.shape
     
-    # we have to set EOS_TOKEN_ID here so that the encoder pad_mask isn't ALL true
-    # as a result, we avoid any nan values while preserving the integrity of the decoder (?)
-    # the rationale is that during inference we never see an EOS token starting the sequence
-    pad_seq = torch.tensor([PAD_TOKEN_ID]).repeat(max_len).to(traj_input_ids.device)
-    pad_seq[0] = EOS_TOKEN_ID
+    # we have to set EOS_TOKEN_ID here so that the encoder pad_mask isn't all true
+    # this won't affect the decoder because we left shift everything
+    pad_seq = torch.full((T-t, N), PAD_TOKEN_ID, device=traj_input_ids.device)
+    pad_seq[:, 0] = BOS_TOKEN_ID
     
-    return torch.cat([traj_input_ids, pad_seq.repeat(T-t, 1)])
+    return torch.cat([traj_input_ids, pad_seq])
 
 def pad_traj_edit_tgts(traj_edit_tgts, T):
     
@@ -87,6 +58,13 @@ def get_input_ids(trajectory, max_len, tokenizer):
         truncation=True,
         return_tensors='pt'
     )['input_ids']
+
+def collate_traj(x):
+    traj_input_ids, log_probs = zip(*x)
+    T = max(traj.shape[0] for traj in traj_input_ids)
+    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
+    log_probs = torch.tensor(log_probs)
+    return traj_input_ids, log_probs
     
 class TrajectoryDataset(Dataset):
     
@@ -195,7 +173,7 @@ class StratifiedInfiniteSampler(Sampler):
                 end = min((i+1) * self.bucket_size, self.num_samples)
                 batch.append(random.randint(start, end - 1))
                 
-            random.shuffle(batch)
+            # random.shuffle(batch)
             yield from batch
     
     def __len__(self):
@@ -309,9 +287,9 @@ def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
         
     return tuple(map(torch.stack, traj_edit_tgts))
 
-### Stuff I'm waiting to delete safely
+### to deprecate
     
-class EvolverDataset(Dataset):
+class _EvolverDataset(Dataset):
     
     @classmethod
     def from_pickle(_, name):
@@ -351,3 +329,30 @@ class EvolverDataset(Dataset):
     
     def __len__(self):
         return len(self.traj_input_ids)
+
+def _get_align_ids(input_ids, output_ids):
+    N = input_ids.shape[0]
+    op_ids, tok_ids, idx_ids = ([], [], [])
+
+    for forced in output_ids:
+        C = torch.sum(input_ids.eq(forced))
+        
+        op_ids.append(torch.cat([
+            torch.tensor([INS_ID]),
+            torch.tensor([CPY_ID]).repeat(C),
+            torch.tensor([SUB_ID]).repeat(N)
+        ]))
+        
+        tok_ids.append(torch.cat([
+            torch.tensor([forced]),
+            torch.tensor([PAD_TOKEN_ID]).repeat(C),
+            torch.tensor([forced]).repeat(N)
+        ]))
+        
+        idx_ids.append(torch.cat([
+            torch.tensor([0]),
+            torch.arange(N)[input_ids.eq(forced).to('cpu')],
+            torch.arange(N)
+        ]))
+        
+    return op_ids, tok_ids, idx_ids

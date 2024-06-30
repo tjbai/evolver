@@ -149,7 +149,7 @@ def particle_filter(
         cpy_mask = input_ids.eq(forced.unsqueeze(1)).unsqueeze(1).expand(B, M, N)
         posterior[:, :, 1:N+1][cpy_mask] = (op_probs[:, :, -1, CPY_ID].unsqueeze(-1) + idx_probs[:, :, -1, :])[cpy_mask]
         posterior[:, :, N+1:] = op_probs[:, :, -1, SUB_ID].unsqueeze(-1) + tok_probs[torch.arange(B), :, -1, forced].unsqueeze(-1) + idx_probs[:, :, -1, :]
-        
+       
         # normalize proposal and sample
         proposal = F.log_softmax(posterior / temperature, dim=-1)
         samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)

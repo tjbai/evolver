@@ -37,17 +37,16 @@ def pad_traj_input_ids(traj_input_ids, T):
 
 def pad_traj_edit_tgts(traj_edit_tgts, T):
     
-    # covers edge case where trajectory is length 2
     if len(traj_edit_tgts[0].shape) == 2:
         traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(0), traj_edit_tgts))
         
-    t, max_len, _ = traj_edit_tgts[0].shape
+    t, N, _ = traj_edit_tgts[0].shape
     device = traj_edit_tgts[0].device
     
     return (
-        torch.cat([traj_edit_tgts[0], F.one_hot(torch.tensor(PAD_ID), 5).repeat(T-t, max_len, 1).to(device)]),
-        torch.cat([traj_edit_tgts[1], F.one_hot(torch.tensor(PAD_TOKEN_ID), VOCAB_SIZE).repeat(T-t, max_len, 1).to(device)]),
-        torch.cat([traj_edit_tgts[2], F.one_hot(torch.tensor(0), max_len).repeat(T-t, max_len, 1).to(device)]),
+        torch.cat([traj_edit_tgts[0], F.one_hot(torch.full((T-t-1, N), PAD_ID, device=device), 5)], dim=0),
+        torch.cat([traj_edit_tgts[1], F.one_hot(torch.full((T-t-1, N), PAD_TOKEN_ID, device=device), VOCAB_SIZE)], dim=0),
+        torch.cat([traj_edit_tgts[2], F.one_hot(torch.full((T-t-1, N), 0, device=device), N)], dim=0),
     )
 
 def get_input_ids(trajectory, max_len, tokenizer):
@@ -58,13 +57,20 @@ def get_input_ids(trajectory, max_len, tokenizer):
         truncation=True,
         return_tensors='pt'
     )['input_ids']
-
-def collate_traj(x):
+    
+def collate_unsupervised(x):
     traj_input_ids, log_probs = zip(*x)
     T = max(traj.shape[0] for traj in traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     log_probs = torch.tensor(log_probs)
     return traj_input_ids, log_probs
+
+def collate_supervised(x):
+    traj_input_ids, traj_edit_tgts = zip(*x)
+    T = max(traj.shape[0] for traj in traj_input_ids)
+    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
+    traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
+    return traj_input_ids, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts)))
     
 class TrajectoryDataset(Dataset):
     
@@ -79,7 +85,7 @@ class TrajectoryDataset(Dataset):
                 traj, log_prob = json.loads(line)
                 traj_list.append(traj)
                 log_probs.append(log_prob)
-                
+
         return cls(traj_list, log_probs, **kwargs)
 
     def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
@@ -97,7 +103,7 @@ class TrajectoryDataset(Dataset):
         return self.traj_input_ids[idx], self.log_probs[idx]
     
 class SupervisedTrajectoryDataset(TrajectoryDataset):
-    
+
     def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
         super().__init__(traj_list, log_probs, max_len, tokenizer, limit)
         
@@ -107,7 +113,7 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             matching_methods='m',
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
-        
+       
         self.traj_edit_tgts = [
             get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
             for traj in tqdm(traj_list, desc='Computing alignments')
@@ -200,7 +206,7 @@ def to_str(op, tok, idx, prev_toks=None, tokenizer=None):
     elif tok: return f'INS({tok_str})'
     elif idx: return f'CPY({idx_str})'
     
-    raise Exception(f'illegal to_str case: {op} {tok} {idx}')
+    return 'UNK'    
 
 def elaborate(traj_edit_tgts, batch_first=True):
     if len(traj_edit_tgts[0].shape) == 3: traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(1), traj_edit_tgts))

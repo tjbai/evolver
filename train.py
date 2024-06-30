@@ -15,9 +15,17 @@ from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 
 from constants import PAD_TOKEN_ID
-from data import elaborate, collate_traj, TrajectoryDataset, Seq2SeqDataset, StratifiedInfiniteSampler
 from model import Evolver, Transformer
 from run import sample_trajectory
+from data import (
+    elaborate,
+    collate_supervised,
+    collate_unsupervised,
+    TrajectoryDataset,
+    SupervisedTrajectoryDataset,
+    Seq2SeqDataset,
+    StratifiedInfiniteSampler
+)
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -41,23 +49,24 @@ def log(data, step=None):
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, eval_steps, grad_accum_steps, checkpoint_at, eval_at,
-    num_particles, threshold, temperature, resample_at,
-    device, prefix
+    num_particles=None, threshold=None, temperature=1.0, resample_at=1,
+    device='cuda', prefix='test'
 ):
-    for step, (traj_input_ids, _) in enumerate(train_loader):
+    for step, (traj_input_ids, traj_edit_tgts) in enumerate(train_loader):
         if step >= train_steps: break
         
         # E-step
         evolver.eval() 
-        traj_edit_tgts, _ = sample_trajectory(
-            evolver, traj_input_ids,
-            num_particles, threshold, temperature, resample_at
-        )
-        logger.info(f'step {step}: {elaborate(traj_edit_tgts)}')
-            
+        if not isinstance(traj_edit_tgts, tuple):
+            traj_edit_tgts, _ = sample_trajectory(
+                evolver, traj_input_ids,
+                num_particles, threshold, temperature, resample_at
+            )
+        
         # M-step
         evolver.train()
-        traj_loss, op_loss, tok_loss, idx_loss = evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+        traj_loss, op_loss, tok_loss, idx_loss = \
+            evolver.traj_loss(traj_input_ids, traj_edit_tgts)
         traj_loss.backward()
         
         if step % grad_accum_steps == 0:
@@ -87,20 +96,21 @@ def train_evolver(
 @torch.no_grad()
 def evaluate_evolver(evolver, eval_loader, eval_steps, device):
     evolver.eval()
-    cur_eval_losses = []
+    tot_loss = 0
+    tot_n = 0
     
     for step, (traj_input_ids, log_posterior) in enumerate(eval_loader):
         if step >= eval_steps: break
         
         _, log_likelihood = sample_trajectory(
             evolver, traj_input_ids.to(device),
-            num_particles=1, threshold=0, temperature=1, resample_at=1e9
+            num_particles=1, threshold=0, temperature=0.5, resample_at=1e9
         )
         
-        num_toks = torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
-        cur_eval_losses.append(torch.sum(log_likelihood - log_posterior) / num_toks)
-        
-    return torch.mean(torch.stack(cur_eval_losses))
+        tot_loss += torch.sum(log_likelihood - log_posterior) 
+        tot_n += torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
+       
+    return tot_loss / tot_n
 
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
@@ -241,9 +251,9 @@ def main():
         
     elif prefix.startswith('ar'):
         pass
-        
-    else:
-        train_dataset = TrajectoryDataset.from_disk(
+    
+    elif prefix.startswith('sup'):
+        train_dataset = SupervisedTrajectoryDataset.from_disk(
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer
@@ -253,7 +263,7 @@ def main():
             train_dataset,
             batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=collate_traj
+            collate_fn=collate_supervised
         )
         
         eval_dataset = TrajectoryDataset.from_disk(
@@ -266,11 +276,50 @@ def main():
             eval_dataset,
             batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
-            collate_fn=collate_traj
+            collate_fn=collate_unsupervised
         )
         
         train_evolver(
-            model, optim, None,
+            model, optim, lr_scheduler,
+            train_loader, eval_loader,
+            train_steps=config['train_steps'],
+            eval_steps=config['eval_steps'],
+            grad_accum_steps=config['grad_accum_steps'],
+            checkpoint_at=config['checkpoint_at'],
+            eval_at=config['eval_at'],
+            device=args.device,
+            prefix=prefix
+        )
+        
+    else:
+        train_dataset = TrajectoryDataset.from_disk(
+            path=config['train'],
+            max_len=config['max_len'],
+            tokenizer=tokenizer
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
+            collate_fn=collate_unsupervised
+        )
+        
+        eval_dataset = TrajectoryDataset.from_disk(
+            path=config['eval'],
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
+            collate_fn=collate_unsupervised
+        )
+        
+        train_evolver(
+            model, optim, lr_scheduler,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
             eval_steps=config['eval_steps'],

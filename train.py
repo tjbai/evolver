@@ -69,12 +69,15 @@ def train_evolver(
                 traj_edit_tgts
             ))
         else:
+            s = time.time()
             traj_edit_tgts, _ = sample_trajectory(
                 evolver, traj_input_ids,
                 num_particles, threshold, temperature, resample_at
             )
+            log({'train/e_time': time.time()-s}, step=step)
         
         # M-step
+        s = time.time()
         evolver.train()
         traj_loss, op_loss, tok_loss, idx_loss = \
             evolver.traj_loss(traj_input_ids, traj_edit_tgts)
@@ -88,10 +91,11 @@ def train_evolver(
             lr_scheduler.step()
         
         log({
-            "train/total_loss": op_loss + tok_loss + idx_loss,
-            "train/op_loss": op_loss,
-            "train/tok_loss": tok_loss,
-            "train/idx_loss": idx_loss
+            'train/total_loss': op_loss + tok_loss + idx_loss,
+            'train/op_loss': op_loss,
+            'train/tok_loss': tok_loss,
+            'train/idx_loss': idx_loss,
+            'train/m_time': time.time()-s
         }, step=step)
         
         if (step + 1) % checkpoint_at == 0:

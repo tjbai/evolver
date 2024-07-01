@@ -13,6 +13,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from transformers import BertTokenizer
+from tqdm import tqdm
 
 from constants import PAD_TOKEN_ID
 from model import Evolver, Transformer
@@ -52,7 +53,10 @@ def train_evolver(
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
     device='cuda', prefix='test'
 ):
-    for step, (traj_input_ids, _, traj_edit_tgts) in enumerate(train_loader):
+    for step, (traj_input_ids, _, traj_edit_tgts) in tqdm(
+        enumerate(train_loader),
+        total=train_steps
+    ):
         if step >= train_steps: break
         
         traj_input_ids = traj_input_ids.to(device)

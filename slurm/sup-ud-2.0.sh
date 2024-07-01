@@ -8,6 +8,7 @@
 #SBATCH --job-name=sup-ud-2.0
 #SBATCH --output=sup-ud-2.0.out
 #SBATCH --mem=80G
+
 ml anaconda
 conda activate evo
 python3 train.py --config configs/sup-ud-2.0.json --device cuda

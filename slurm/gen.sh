@@ -19,6 +19,7 @@ cat << EOF > "slurm/${job_name}.sh"
 #SBATCH --job-name=$job_name
 #SBATCH --output=$job_name.out
 #SBATCH --mem=80G
+
 ml anaconda
 conda activate evo
 python3 train.py --config $config_path --device cuda

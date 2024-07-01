@@ -63,14 +63,14 @@ def collate_unsupervised(x):
     T = max(traj.shape[0] for traj in traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     log_probs = torch.tensor(log_probs)
-    return traj_input_ids, log_probs
+    return traj_input_ids, log_probs, None
 
 def collate_supervised(x):
     traj_input_ids, traj_edit_tgts = zip(*x)
     T = max(traj.shape[0] for traj in traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
-    return traj_input_ids, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts)))
+    return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts)))
     
 class TrajectoryDataset(Dataset):
     

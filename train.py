@@ -52,12 +52,19 @@ def train_evolver(
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
     device='cuda', prefix='test'
 ):
-    for step, (traj_input_ids, traj_edit_tgts) in enumerate(train_loader):
+    for step, (traj_input_ids, _, traj_edit_tgts) in enumerate(train_loader):
         if step >= train_steps: break
+        
+        traj_input_ids = traj_input_ids.to(device)
         
         # E-step
         evolver.eval() 
-        if not isinstance(traj_edit_tgts, tuple):
+        if traj_edit_tgts is not None:
+            traj_edit_tgts = tuple(map(
+                lambda x: x.to(device),
+                traj_edit_tgts
+            ))
+        else:
             traj_edit_tgts, _ = sample_trajectory(
                 evolver, traj_input_ids,
                 num_particles, threshold, temperature, resample_at
@@ -67,8 +74,8 @@ def train_evolver(
         evolver.train()
         traj_loss, op_loss, tok_loss, idx_loss = \
             evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+            
         traj_loss.backward()
-        
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
@@ -99,7 +106,7 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
     tot_loss = 0
     tot_n = 0
     
-    for step, (traj_input_ids, log_posterior) in enumerate(eval_loader):
+    for step, (traj_input_ids, log_posterior, _) in enumerate(eval_loader):
         if step >= eval_steps: break
         
         _, log_likelihood = sample_trajectory(
@@ -161,7 +168,7 @@ def train_ar(
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--local', action='store_true')
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()

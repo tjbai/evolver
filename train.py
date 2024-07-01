@@ -243,7 +243,8 @@ def init_run(prefix, name, device, local, config):
             project='evolver',
             name=name,
             config=config,
-            resume='allow'
+            resume='allow',
+            notes=config.get('notes', 'N/A')
         )
     
     return model, optim, lr_scheduler, start_step

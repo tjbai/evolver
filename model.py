@@ -36,25 +36,29 @@ def xent(logprobs, tgts, ignore=-1):
     n = max(torch.sum(keep_mask), 1)
     return -tot, n
 
-class PositionalEncoding(nn.Module): # borrowed from huggingface
+class CosineEmbedding(nn.Module):
     
     def __init__(self, d_model=512, dropout=0.1, max_len=10):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout) 
         pos = torch.arange(max_len).unsqueeze(1)
         div = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10_000) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(pos * div)
-        pe[:, 0, 1::2] = torch.cos(pos * div)
-        
-        # batch first
-        pe = pe.transpose(0, 1) 
-        
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(pos * div)
+        pe[0, :, 1::2] = torch.cos(pos * div)
         self.register_buffer('pe', pe)
     
     def forward(self, x, dir):
         x = x + dir * self.pe[:, :x.shape[-2], :]
         return self.dropout(x) if dir > 0 else x
+    
+class RotaryEmbedding(nn.Module):
+    
+    def __init__(self):
+        pass
+    
+    def forward(self, x, dir):
+        pass
     
 class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     
@@ -143,9 +147,10 @@ class Evolver(nn.Module):
     def __init__(
         self,
         d_model=512, nhead=12, max_len=10,
-        encoder_layers=6, decoder_layers=6,
         dropout=0.1, dim_feedforward=2048,
+        encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
+        pos_embedding='cosine', # TODO -- rope
         device='cpu'
     ):
         super().__init__()
@@ -156,8 +161,8 @@ class Evolver(nn.Module):
         self.device = device
         self.vocab_size = vocab_size
       
-        self.embedding = nn.Embedding(VOCAB_SIZE, d_model)
-        self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_encoding = CosineEmbedding(d_model=d_model, max_len=max_len)
         
         self.pad_token_id = PAD_TOKEN_ID
         self.bos_token_id = BOS_TOKEN_ID # use [CLS] as BOS

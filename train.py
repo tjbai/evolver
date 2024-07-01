@@ -113,8 +113,11 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
     for step, (traj_input_ids, log_posterior, _) in enumerate(eval_loader):
         if step >= eval_steps: break
         
+        traj_input_ids = traj_input_ids.to(device)
+        log_posterior = traj_input_ids.to(device)
+        
         _, log_likelihood = sample_trajectory(
-            evolver, traj_input_ids.to(device),
+            evolver, traj_input_ids,
             num_particles=1, threshold=0, temperature=0.5, resample_at=1e9
         )
         
@@ -174,6 +177,7 @@ def parse_args():
     parser.add_argument('--config', required=True)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--local', action='store_true')
+    parser.add_argument('--from-checkpoint', default=None)
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
@@ -197,17 +201,15 @@ def main():
             config=config
         )
     
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    
-    Model = Transformer if prefix.startswith('ar') else Evolver
-    model = Model(
-        d_model=config['d_model'],
-        nhead=config['nhead'],
-        max_len=config['max_len'],
-        encoder_layers=config['encoder_layers'],
-        decoder_layers=config['decoder_layers'],
-        device=args.device
-    ).to(args.device)
+    model = \
+        (Transformer if prefix.startswith('ar') else Evolver)(
+            d_model=config['d_model'],
+            nhead=config['nhead'],
+            max_len=config['max_len'],
+            encoder_layers=config['encoder_layers'],
+            decoder_layers=config['decoder_layers'],
+            device=args.device
+        ).to(args.device)
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     
@@ -221,7 +223,10 @@ def main():
         div_factor=10,
         final_div_factor=1
     )
-        
+    
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+       
+    # autoregressive seq2seq 
     if prefix.startswith('ar-d'):
         train_dataset = Seq2SeqDataset.from_trajectories(
             path=config['train'],
@@ -259,10 +264,12 @@ def main():
             device=args.device,
             prefix=prefix
         ) 
-        
+       
+    ### baseline autoregressive 
     elif prefix.startswith('ar'):
         pass
-    
+   
+    ### supervised evolver
     elif prefix.startswith('sup'):
         train_dataset = SupervisedTrajectoryDataset.from_disk(
             path=config['train'],
@@ -301,7 +308,8 @@ def main():
             device=args.device,
             prefix=prefix
         )
-        
+    
+    ### unsupervised evolver 
     else:
         train_dataset = TrajectoryDataset.from_disk(
             path=config['train'],

@@ -237,13 +237,14 @@ def init_run(prefix, name, device, local, config):
     if not wandb_run:
         wandb_run = wandb.util.generate_id()
 
-    wandb.init(
-        id=wandb_run,
-        project='evolver',
-        name=config.get('name', 'unnamed_run'),
-        config=config,
-        resume='allow'
-    )
+    if not local:
+        wandb.init(
+            id=wandb_run,
+            project='evolver',
+            name=name,
+            config=config,
+            resume='allow'
+        )
     
     return model, optim, lr_scheduler, start_step
 

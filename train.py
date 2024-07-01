@@ -51,10 +51,10 @@ def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, eval_steps, grad_accum_steps, checkpoint_at, eval_at,
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
-    device='cuda', prefix='test'
+    device='cuda', name='test', start_step=0
 ):
     for step, (traj_input_ids, _, traj_edit_tgts) in tqdm(
-        enumerate(train_loader),
+        enumerate(train_loader, start=start_step),
         total=train_steps
     ):
         if step >= train_steps: break
@@ -100,8 +100,13 @@ def train_evolver(
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
-            torch.save(evolver.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
-            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{step+1}')
+            torch.save({
+                'step': step,
+                'model': evolver.state_dict(),
+                'optim': optim.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'wandb_run_id': wandb.run.id
+            }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
             s = time.time()
@@ -133,7 +138,7 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    device, prefix
+    device, name
 ):
     for step, (input_ids, output_ids) in enumerate(train_loader):
         if step == train_steps: break
@@ -157,8 +162,13 @@ def train_ar(
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
-            torch.save(model.state_dict(), f'{save_path}/{prefix}-model-{step+1}')
-            torch.save(optim.state_dict(), f'{save_path}/{prefix}-optim-{step+1}')
+            torch.save({
+                'step': step,
+                'model': model.state_dict(),
+                'optim': optim.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'wandb_run_id': wandb.run.id
+            }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
             model.eval()
@@ -190,21 +200,7 @@ def parse_model_id(s):
     id = '.'.join(name.split('.')[:-1]) or name
     return id
 
-def main():
-    args = parse_args()
-    logger.setLevel(getattr(logging, args.log_level))
-    
-    with open(args.config, 'r') as f: config = json.load(f)
-    prefix = parse_model_id(args.config)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-   
-    if not args.local:
-        wandb.init(
-            project='evolver',
-            name=f'{prefix}_{timestamp}',
-            config=config
-        )
-    
+def init_run(prefix, name, device, local, config):
     model = \
         (Transformer if prefix.startswith('ar') else Evolver)(
             d_model=config['d_model'],
@@ -212,8 +208,8 @@ def main():
             max_len=config['max_len'],
             encoder_layers=config['encoder_layers'],
             decoder_layers=config['decoder_layers'],
-            device=args.device
-        ).to(args.device)
+            device=device
+        ).to(device)
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     
@@ -228,6 +224,36 @@ def main():
         final_div_factor=1
     )
     
+    if not local:
+        if 'from_checkpoint' in config:
+            checkpoint = torch.load(config['from_checkpoint'])
+            model.load_state_dict(checkpoint['model']) 
+            
+            if 'resume' in config:
+                optim.load_state_dict(checkpoint['optim'])
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                start_step = checkpoint['step'] + 1
+                wandb.init(d=checkpoint['wandb_run_id'], resume='must')
+            else:
+                start_step = 0
+                wandb.init(project='evolver', name=name, config=config)
+                
+        else:
+            wandb.init(project='evolver', name=name, config=config)
+    
+    return model, optim, lr_scheduler, start_step
+
+def main():
+    args = parse_args()
+    logger.setLevel(getattr(logging, args.log_level))
+    
+    with open(args.config, 'r') as f: config = json.load(f)
+    prefix = parse_model_id(args.config)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f'{prefix}_{timestamp}'
+    
+    model, optim, lr_scheduler, start_step = \
+        init_run(prefix, name, args.device, args.local, config)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
        
     # autoregressive seq2seq 
@@ -266,7 +292,7 @@ def main():
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
-            prefix=prefix
+            name=name
         ) 
        
     ### baseline autoregressive 
@@ -310,7 +336,8 @@ def main():
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
-            prefix=prefix
+            name=name,
+            start_step=start_step
         )
     
     ### unsupervised evolver 
@@ -354,7 +381,8 @@ def main():
             temperature=config['temperature'],
             resample_at=config['resample_at'],
             device=args.device,
-            prefix=prefix
+            name=name,
+            start_step=start_step
         )
 
 if __name__ == '__main__':

@@ -224,22 +224,26 @@ def init_run(prefix, name, device, local, config):
         final_div_factor=1
     )
     
-    if not local:
-        if 'from_checkpoint' in config:
-            checkpoint = torch.load(config['from_checkpoint'])
-            model.load_state_dict(checkpoint['model']) 
-            
-            if 'resume' in config:
-                optim.load_state_dict(checkpoint['optim'])
-                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-                start_step = checkpoint['step'] + 1
-                wandb.init(d=checkpoint['wandb_run_id'], resume='must')
-            else:
-                start_step = 0
-                wandb.init(project='evolver', name=name, config=config)
-                
-        else:
-            wandb.init(project='evolver', name=name, config=config)
+    if 'from_checkpoint' in config:
+        checkpoint = torch.load(config['from_checkpoint'])
+        model.load_state_dict(checkpoint['model'])
+
+        if 'resume' in config:
+            optim.load_state_dict(checkpoint['optim'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            start_step = checkpoint['step'] + 1
+            wandb_run = checkpoint['wandb_run_id']
+
+    if not wandb_run:
+        wandb_run = wandb.util.generate_id()
+
+    wandb.init(
+        id=wandb_run,
+        project='evolver',
+        name=config.get('name', 'unnamed_run'),
+        config=config,
+        resume='allow'
+    )
     
     return model, optim, lr_scheduler, start_step
 

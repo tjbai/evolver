@@ -35,4 +35,5 @@ AR denoising is around 15 tokens per example, on average
 
 ar_bsz * X = evo_bsz * traj * Y => Y / X = ar_bsz / (evo_bsz * traj)
 
-improved particle filter does batch size 64 in ~25 seconds. basically a clean 3x speedup.
+improved particle filter does batch size 64 in ~25 seconds. basically a clean 3x speedup
+

@@ -240,7 +240,7 @@ def init_run(prefix, name, device, local, config):
 
     if not local:
         wandb.init(
-            id=wandb_run,
+            id=wandb_run_id,
             project='evolver',
             name=name,
             config=config,

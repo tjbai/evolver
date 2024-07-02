@@ -138,9 +138,12 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    device, name
+    device, name, start_step
 ):
-    for step, (input_ids, output_ids) in enumerate(train_loader):
+    for step, (input_ids, output_ids) in enumerate(
+        train_loader,
+        start=start_step
+    ):
         if step == train_steps: break
 
         input_ids = input_ids.to(device)
@@ -225,6 +228,7 @@ def init_run(prefix, name, device, local, config):
     )
    
     wandb_run_id = None 
+    start_step = 0
     if 'from_checkpoint' in config:
         checkpoint = torch.load(config['from_checkpoint'])
         model.load_state_dict(checkpoint['model'])

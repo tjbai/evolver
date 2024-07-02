@@ -88,7 +88,6 @@ def maybe_resample(weights, threshold, M):
     return samples, resample_mask
 
 @torch.no_grad()
-@torch.compile()
 def particle_filter(
     evolver,
     input_ids,    # BxN

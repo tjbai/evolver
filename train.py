@@ -223,7 +223,8 @@ def init_run(prefix, name, device, local, config):
         div_factor=10,
         final_div_factor=1
     )
-    
+   
+    wandb_run_id = None 
     if 'from_checkpoint' in config:
         checkpoint = torch.load(config['from_checkpoint'])
         model.load_state_dict(checkpoint['model'])
@@ -232,10 +233,10 @@ def init_run(prefix, name, device, local, config):
             optim.load_state_dict(checkpoint['optim'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             start_step = checkpoint['step'] + 1
-            wandb_run = checkpoint['wandb_run_id']
+            wandb_run_id = checkpoint['wandb_run_id']
 
-    if not wandb_run:
-        wandb_run = wandb.util.generate_id()
+    if wandb_run_id is None:
+        wandb_run_id = wandb.util.generate_id()
 
     if not local:
         wandb.init(

@@ -123,7 +123,7 @@ def particle_filter(
     for i in range(1, N):
         forced = output_ids[:, i]
      
-        # BxMxIx_ -> BMxIx_ 
+        # BxMxIx_ -> BMxIx_
         ens = tuple(map(
             lambda x: x.view(B*M, N, -1)[:, :i, :],
             (ens_ops, ens_toks, ens_idxs)

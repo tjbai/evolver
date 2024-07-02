@@ -177,6 +177,7 @@ class StratifiedInfiniteSampler(Sampler):
             for i in range(self.batch_size):
                 start = i * self.bucket_size
                 end = min((i+1) * self.bucket_size, self.num_samples)
+                if start >= end: break # edge case i'm too tired to fix
                 batch.append(random.randint(start, end - 1))
                 
             # random.shuffle(batch)

@@ -309,6 +309,11 @@ def main():
        
     ### baseline autoregressive 
     elif prefix.startswith('ar'):
+        train_dataset = Seq2SeqDataset.from_trajectories(
+            path=config['train'],
+        )
+
+        
         pass
    
     ### supervised evolver

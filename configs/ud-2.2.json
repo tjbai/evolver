@@ -2,6 +2,8 @@
     "train": "data/ud/ud_train_2.0.jsonl",
     "eval": "data/ud/ud_dev_2.0.jsonl",
     "notes": "tweak train steps (and by extension lr scaling)",
+    "from_checkpoint": "/scratch4/jeisner1/checkpoints/ud-2.2_20240701_235145-800.pt",
+    "resume": true,
 
     "d_model": 512,
     "nhead": 8,

@@ -123,7 +123,7 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
         if step >= eval_steps: break
         
         traj_input_ids = traj_input_ids.to(device)
-        log_posterior = traj_input_ids.to(device)
+        log_posterior = log_posterior.to(device)
         
         _, log_likelihood = sample_trajectory(
             evolver, traj_input_ids,
@@ -230,6 +230,7 @@ def init_run(prefix, name, device, local, config):
     wandb_run_id = None 
     start_step = 0
     if 'from_checkpoint' in config:
+        logger.info(f'Loading from {config["from_checkpoint"]}')
         checkpoint = torch.load(config['from_checkpoint'])
         model.load_state_dict(checkpoint['model'])
 

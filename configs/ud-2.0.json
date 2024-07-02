@@ -1,6 +1,8 @@
 {
     "train": "data/ud/ud_train_2.0.jsonl",
     "eval": "data/ud/ud_dev_2.0.jsonl",
+    "from_checkpoint": "/scratch4/jeisner1/checkpoints/ud-2.0_20240701_202115-150.pt",
+    "resume": true,
 
     "d_model": 512,
     "nhead": 8,

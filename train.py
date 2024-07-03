@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
 from transformers import BertTokenizer
 from tqdm import tqdm
 
@@ -47,9 +48,25 @@ def log(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: print(f"Step {step}: {data}")
 
+def grad_norm(mod):
+    tot = 0
+    for p in mod.parameters():
+        if p.grad is not None:
+            norm = p.grad.data.norm(2)
+            tot += norm.item() ** 2
+    return tot ** 0.5
+
+def record_grad_norms(evolver, step):
+    log({
+        'train/op_grad_norm': grad_norm(evolver.op_head),
+        'train/tok_grad_norm': grad_norm(evolver.tok_head),
+        'train/idx_grad_norm': grad_norm(evolver.idx_head)
+    }, step=step) 
+
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
-    train_steps, eval_steps, grad_accum_steps, checkpoint_at, eval_at,
+    train_steps, eval_steps, grad_accum_steps, clip_gradients,
+    checkpoint_at, eval_at,
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
     device='cuda', name='test', start_step=0
 ):
@@ -83,6 +100,10 @@ def train_evolver(
             evolver.traj_loss(traj_input_ids, traj_edit_tgts)
             
         traj_loss.backward()
+        record_grad_norms(evolver, step)
+        if clip_gradients:
+            clip_grad_norm_(evolver.parameters(), 1)
+        
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
@@ -392,6 +413,7 @@ def main():
             train_steps=config['train_steps'],
             eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
+            clip_gradients=config['clip_gradients'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
@@ -433,6 +455,7 @@ def main():
             train_steps=config['train_steps'],
             eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
+            clip_gradients=config['clip_gradients'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             num_particles=config['num_particles'],

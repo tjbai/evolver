@@ -12,7 +12,7 @@
 
     "lr": 3e-4,
     "warmup_percent": 0.0,
-    "clip_gradients": false,
+    "clip_gradients": true,
     "train_steps": 500,
     "eval_steps": 10,
     "batch_size": 1,

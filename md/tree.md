@@ -37,3 +37,8 @@ ar_bsz * X = evo_bsz * traj * Y => Y / X = ar_bsz / (evo_bsz * traj)
 
 improved particle filter does batch size 64 in ~25 seconds. basically a clean 3x speedup
 
+ud-2.0 and 2.2: basic with different training steps
+sup-ud-2.0: basic with supervision
+ud-2.3: more exploration
+ud-2.4: clip grads
+ar-ud-2.0: decoder-only baseline

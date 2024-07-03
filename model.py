@@ -346,8 +346,10 @@ class Transformer(nn.Module):
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.embedding.weight # weight tying
         
-        self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_len)
-      
+        self.positional_encoding = CosineEmbedding(d_model=d_model, max_len=max_len)
+     
+        # despite naming, the encoder layers are used for the decoder-only baseline
+        # this is my fault for using the pytorch transformer in the first place
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,

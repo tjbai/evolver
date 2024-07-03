@@ -1,3 +1,4 @@
+import os
 import time
 import math
 import json
@@ -104,7 +105,7 @@ class TrajectoryDataset(Dataset):
     
 class SupervisedTrajectoryDataset(TrajectoryDataset):
 
-    def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
+    def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None, cache_prefix=None):
         super().__init__(traj_list, log_probs, max_len, tokenizer, limit)
         
         aligner = SentenceAligner(
@@ -113,14 +114,26 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             matching_methods='m',
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
-       
-        self.traj_edit_tgts = [
-            get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
-            for traj in tqdm(traj_list, desc='Computing alignments')
-        ]
+        
+        self.cache_prefix = cache_prefix
+        self.cache_path = f'/scratch4/jeisner1/cache/' if torch.cuda.is_available() else 'cache'
+        os.makedirs(self.cache_path, exist_ok=True)
+        
+        for i, (traj_input_ids, traj) in tqdm(
+            enumerate(zip(self.traj_input_ids, traj_list)),
+            desc='Computing alignments'
+        ):
+            path = f'{self.cache_path}/{self.cache_prefix}_{i}.pkl'
+            if os.path.exists(path): continue
+            
+            traj_edit_tgts = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
+            with open(path, 'wb') as f:
+                pickle.dump((traj_input_ids, traj_edit_tgts), f)
         
     def __getitem__(self, idx):
-        return self.traj_input_ids[idx], self.traj_edit_tgts[idx]
+        with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.pkl', 'rb') as f:
+            traj_input_ids, traj_edit_tgts = pickle.load(f)
+            return traj_input_ids, traj_edit_tgts
     
 class Seq2SeqDataset(Dataset):
     

@@ -138,11 +138,11 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    device, name, start_step
+    input_is_tgt, device, name, start_step
 ):
-    for step, (input_ids, output_ids) in enumerate(
-        train_loader,
-        start=start_step
+    for step, (input_ids, output_ids) in tqdm(
+        enumerate(train_loader, start=start_step),
+        total=train_steps
     ):
         if step == train_steps: break
 
@@ -150,7 +150,8 @@ def train_ar(
         output_ids = output_ids.to(device)
        
         model.train() 
-        tot_loss, n = model.loss(input_ids, output_ids)
+        if input_is_tgt: tot_loss, n = model.loss(output_ids, None)
+        else: tot_loss, n = model.loss(input_ids, output_ids)
         loss = tot_loss / n 
         loss.backward()
         
@@ -161,7 +162,7 @@ def train_ar(
         if lr_scheduler: 
             lr_scheduler.step()
        
-        log({'train/loss': loss.item()}, step=step)
+        log({'train/total_loss': loss.item()}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
             save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
@@ -170,7 +171,7 @@ def train_ar(
                 'model': model.state_dict(),
                 'optim': optim.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
-                'wandb_run_id': wandb.run.id
+                'wandb_run_id': None if wandb.run is None else wandb.run.id
             }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
@@ -182,12 +183,13 @@ def train_ar(
                 for input_ids, output_ids in eval_loader:
                     input_ids = input_ids.to(device)
                     output_ids = output_ids.to(device)
-                    loss, n = model.loss(input_ids, output_ids)
+                    if input_is_tgt: loss, n = model.loss(output_ids, None)
+                    else: loss, n = model.loss(input_ids, output_ids)
                     tot_loss += loss
                     tot_n += n
                     
             eval_loss = tot_loss / tot_n
-            log({'eval/loss': eval_loss.item()}, step=step)
+            log({'eval/loss': -eval_loss.item()}, step=step)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -230,7 +232,7 @@ def init_run(prefix, name, device, local, config):
     wandb_run_id = None 
     start_step = 0
     if 'from_checkpoint' in config:
-        logger.info(f'Loading from {config["from_checkpoint"]}')
+        logger.info(f'loading from {config["from_checkpoint"]}')
         checkpoint = torch.load(config['from_checkpoint'])
         model.load_state_dict(checkpoint['model'])
 
@@ -239,9 +241,11 @@ def init_run(prefix, name, device, local, config):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             start_step = checkpoint['step'] + 1
             wandb_run_id = checkpoint['wandb_run_id']
+            logger.info(f'resuming from {start_step}')
 
     if wandb_run_id is None:
         wandb_run_id = wandb.util.generate_id()
+        logger.info('starting new run')
 
     if not local:
         wandb.init(
@@ -303,23 +307,17 @@ def main():
             grad_accum_steps=config['grad_accum_steps'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
+            input_is_tgt=False,
             device=args.device,
-            name=name
+            name=name,
+            start_step=start_step
         ) 
        
     ### baseline autoregressive 
     elif prefix.startswith('ar'):
         train_dataset = Seq2SeqDataset.from_trajectories(
             path=config['train'],
-        )
-
-        
-        pass
-   
-    ### supervised evolver
-    elif prefix.startswith('sup'):
-        train_dataset = SupervisedTrajectoryDataset.from_disk(
-            path=config['train'],
+            denoising=True,
             max_len=config['max_len'],
             tokenizer=tokenizer
         )
@@ -327,8 +325,52 @@ def main():
         train_loader = DataLoader(
             train_dataset,
             batch_size=config['batch_size'],
+            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
+        )
+        
+        eval_dataset = Seq2SeqDataset.from_trajectories(
+            path=config['eval'],
+            denoising=True,
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=config['batch_size'],
+            shuffle=True
+        )
+
+        train_ar(
+            model, optim, lr_scheduler,
+            train_loader, eval_loader,
+            train_steps=config['train_steps'],
+            grad_accum_steps=config['grad_accum_steps'],
+            checkpoint_at=config['checkpoint_at'],
+            eval_at=config['eval_at'],
+            input_is_tgt=True,
+            device=args.device,
+            name=name,
+            start_step=start_step
+        )  
+   
+    ### supervised evolver
+    elif prefix.startswith('sup'):
+        train_dataset = SupervisedTrajectoryDataset.from_disk(
+            path=config['train'],
+            max_len=config['max_len'],
+            tokenizer=tokenizer,
+            cache_prefix=name
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=collate_supervised
+            collate_fn=collate_supervised,
+            num_workers=4,
+            prefetch_factor=2,
+            pin_memory=True
         )
         
         eval_dataset = TrajectoryDataset.from_disk(

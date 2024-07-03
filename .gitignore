@@ -1,5 +1,4 @@
 checkpoints
-cache
 example.ipynb
 .DS_Store
 **.env
@@ -9,3 +8,5 @@ __pycache__
 wandb
 *_CHECKPOINT
 media
+**.pt
+**/cache

@@ -146,7 +146,7 @@ class Evolver(nn.Module):
     
     def __init__(
         self,
-        d_model=512, nhead=12, max_len=10,
+        d_model=512, nhead=8, max_len=10,
         dropout=0.1, dim_feedforward=2048,
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
@@ -197,7 +197,7 @@ class Evolver(nn.Module):
         B, cur_len = op_ids.shape
         
         if len(input_ids.shape) == 1:
-            input_ids = input_ids.unsqueeze(0).repeat(B, 1)
+            input_ids = input_ids.unsqueeze(0).expand(B, -1)
         
         tgt = torch.zeros(B, cur_len, self.d_model).to(self.device)
        
@@ -263,11 +263,12 @@ class Evolver(nn.Module):
             
         tgt = self.compute_tgt(input_ids, memory, edit_tgts)
         cur_len = tgt.shape[1]
+        tgt_pad_mask = None if tgt_pad_mask is None else tgt_pad_mask[:, :cur_len]
       
         output, new_cache = self.decoder(
             tgt, memory,
             cache=cache,
-            tgt_key_padding_mask=tgt_pad_mask[:, :cur_len],
+            tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_pad_mask,
         )
         

@@ -221,34 +221,51 @@ def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
     tot = log_likelihoods - log_posteriors
     return torch.sum(tot) / num_samples
 
-def baseline_likelihood(model, traj_input_ids):
-    B, T, _ = traj_input_ids.shape
-    traj_src, traj_pad_mask = model.get_src(traj_input_ids)
-    log_probs = torch.zeros(B)
+@torch.no_grad()
+def fast_sample(
+    evolver,
+    input_ids,
+    src, src_pad_mask,
+    M, threshold,
+    resample_at
+):
+    B, N = input_ids.shape
+    device = input_ids.device
     
-    for i in range(T-1):
-        src = traj_src[:, i, :]
-        tgt = traj_src[:, i+1, :]
-        src_pad_mask = traj_pad_mask[:, i, :]
-        tgt_pad_mask = traj_pad_mask[:, i+1, :]
-      
-        cache = None
-        memory = None
-        for j in range(1, model.max_len):
-            forced = traj_input_ids[:, i+1, j]
-            
-            tok_logits, cache, memory = model.forward(
-                src, tgt[:, :j, :],
-                src_pad_mask, tgt_pad_mask,
-                memory, cache
-            )
-            
-            tok_probs = F.log_softmax(tok_logits, dim=-1)
-            probs = torch.gather(tok_probs, dim=2, index=forced.view(1, 1, B)).squeeze()
-            probs[forced.eq(PAD_TOKEN_ID)] = 0
-            log_probs += probs
+    batch_ids = input_ids.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
+    src = src.unsqueeze(1).expand(-1, M, -1, -1).reshape(B*M, N, -1)
+    src_pad_mask = src_pad_mask.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
+    
+    log_probs = torch.zeros(B, M, device=device)
+    ens_ops = torch.zeros(B*M, N, 5, dtype=torch.long, device=device)
+    ens_toks = torch.zeros(B*M, N, VOCAB_SIZE, dtype=torch.long, device=device)
+    ens_idxs = torch.zeros(B*M, N, N, dtype=torch.long, device=device)
+    
+    # initialize BOS
+    ens_ops[:, 0, INS_ID] = 1
+    ens_toks[:, 0, BOS_TOKEN_ID] = 1
+    ens_idxs[:, 0, 0] = 1
+   
+    memory = cache = None
+    for i in range(1, N):
+        edit_probs, _, memory, cache = evolver.forward(
+            batch_ids.view(B*M, N),
+            src.view(B*M, N, -1),
+            (ens_ops, ens_toks, ens_idxs),
+            src_pad_mask.view(B*M, N),
+            None, memory, cache
+        )
+       
+        op_probs, tok_probs, idx_probs = tuple(map(
+            lambda x: x[:, -1],
+            edit_probs
+        ))
         
-    return log_probs
+        ops = torch.multinomial(torch.exp(op_probs), num_samples=1)
+        toks = torch.multinomial(torch.exp(tok_probs), num_samples=1)
+        idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1)
+        
+        return op_probs, tok_probs, idx_probs, ops, toks, idxs 
 
 def apply_edits(input_ids, edits):
     edits = tuple(map(lambda x: torch.argmax(x, dim=-1), edits)) 
@@ -269,12 +286,12 @@ def apply_edits(input_ids, edits):
     
     return res
    
-### deprecated utilities
+### a bunch of old unused code
 
-def decode_stochastic(edit_probs):
+def _decode_stochastic(edit_probs):
     return tuple(map(lambda x: torch.multinomial(torch.exp(x), num_samples=1).squeeze(), edit_probs)) 
     
-def decode_greedy(edit_probs):
+def _decode_greedy(edit_probs):
     cands = []
     op_probs, tok_probs, index_probs = edit_probs
             
@@ -298,7 +315,7 @@ def decode_greedy(edit_probs):
         best_indices,
     )   
  
-def decode(
+def _decode(
     evolver,
     src, pad_mask, edit_tgts,
     strategy='greedy' # who needs OOP
@@ -331,8 +348,6 @@ def decode(
         raise NotImplementedError()
         
     return edit_tgts, tgt
-
-### to deprecate
 
 @torch.no_grad()
 def _particle_filter(
@@ -474,3 +489,32 @@ def _sample_trajectory(
         log_traj_prob += log_prob
     
     return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob
+
+def baseline_likelihood(model, traj_input_ids):
+    B, T, _ = traj_input_ids.shape
+    traj_src, traj_pad_mask = model.get_src(traj_input_ids)
+    log_probs = torch.zeros(B)
+    
+    for i in range(T-1):
+        src = traj_src[:, i, :]
+        tgt = traj_src[:, i+1, :]
+        src_pad_mask = traj_pad_mask[:, i, :]
+        tgt_pad_mask = traj_pad_mask[:, i+1, :]
+      
+        cache = None
+        memory = None
+        for j in range(1, model.max_len):
+            forced = traj_input_ids[:, i+1, j]
+            
+            tok_logits, cache, memory = model.forward(
+                src, tgt[:, :j, :],
+                src_pad_mask, tgt_pad_mask,
+                memory, cache
+            )
+            
+            tok_probs = F.log_softmax(tok_logits, dim=-1)
+            probs = torch.gather(tok_probs, dim=2, index=forced.view(1, 1, B)).squeeze()
+            probs[forced.eq(PAD_TOKEN_ID)] = 0
+            log_probs += probs
+        
+    return log_probs

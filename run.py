@@ -155,8 +155,8 @@ def particle_filter(
         proposal = F.log_softmax(logits, dim=-1)
 
         # NOTE -- revert this
-        # samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
-        samples = torch.zeros(B*M, 1, device=device, dtype=torch.long)
+        samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
+        # samples = torch.zeros(B*M, 1, device=device, dtype=torch.long)
 
         posterior_probs = torch.gather(posterior.view(B*M, -1), dim=-1, index=samples)
         proposal_probs = torch.gather(proposal.view(B*M, -1), dim=-1, index=samples)
@@ -168,8 +168,9 @@ def particle_filter(
         sample_weight = posterior_probs - proposal_probs
         
         # C[i, j] = one_hot(B[i, A[i, j]]])
-        fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=A.device).unsqueeze(1).expand_as(A), A], num_classes=D)
-        
+        fn = lambda A, B, D: F.one_hot(B[torch.arange(B, device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
+       
+        # TODO -- implement a fast(er) update 
         update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))
         ens_ops[update, :, i, :] = fn(samples, op_ids[:, i, :], 5)[update]
         ens_toks[update, :, i, :] = fn(samples, tok_ids[:, i, :], VOCAB_SIZE)[update]
@@ -242,6 +243,8 @@ def fast_sample(
     src_pad_mask = src_pad_mask.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     
     log_probs = torch.zeros(B, M, device=device)
+    alive = torch.ones(B*M, dtype=torch.bool)
+    
     ens_ops = torch.zeros(B*M, N, 5, dtype=torch.long, device=device)
     ens_toks = torch.zeros(B*M, N, VOCAB_SIZE, dtype=torch.long, device=device)
     ens_idxs = torch.zeros(B*M, N, N, dtype=torch.long, device=device)
@@ -266,11 +269,31 @@ def fast_sample(
             edit_probs
         ))
         
-        ops = torch.multinomial(torch.exp(op_probs), num_samples=1)
-        toks = torch.multinomial(torch.exp(tok_probs), num_samples=1)
-        idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1)
+        ops = torch.multinomial(torch.exp(op_probs), num_samples=1).squeeze()
+        toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
+        idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
         
-        return op_probs, tok_probs, idx_probs, ops, toks, idxs 
+        # handle pad and eos   
+        alive &= ~ops.eq(EOS_ID)
+        ens_ops[~alive, i, PAD_ID] = 1
+        ens_ops[ops.eq(EOS_ID), i, EOS_ID] = 1
+        ens_toks[~alive, i, PAD_TOKEN_ID] = 1
+        ens_idxs[~alive, i, 0] = 1
+        
+        # update the living
+        ens_ops[torch.arange(B*M, device=device)[alive], i, ops[alive]] = 1
+        ens_toks[torch.arange(B*M, device=device)[alive], i, toks[alive]] = 1
+        ens_idxs[torch.arange(B*M, device=device)[alive], i, idxs[alive]] = 1
+       
+        # update log probs 
+        log_probs += torch.gather(op_probs, 1, ops.unsqueeze(1))
+        log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += torch.gather(tok_probs, 1, toks.unsqueeze(1))
+        log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += torch.gather(idx_probs, 1, idxs.unsqueeze(1))
+        
+    return (
+        (ens_ops.view(B, M, -1), ens_toks.view(B, M, -1), ens_idxs.view(B, M, -1)),
+        log_probs.view(B, M)
+    )
 
 def apply_edits(input_ids, edits):
     edits = tuple(map(lambda x: torch.argmax(x, dim=-1), edits)) 

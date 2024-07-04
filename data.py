@@ -125,7 +125,9 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             desc='Computing alignments'
         ):
             path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
-            if os.path.exists(path): continue
+            if os.path.exists(path):
+                logger.info(f'hit {self.cache_prefix} cache')
+                continue
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
             # buffer = io.BytesIO()

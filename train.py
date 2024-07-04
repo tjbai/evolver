@@ -151,7 +151,7 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
             num_particles=1, threshold=0, temperature=0.5, resample_at=1e9
         )
         
-        tot_loss += torch.sum(log_likelihood - log_posterior) 
+        tot_loss += torch.sum(log_likelihood - log_posterior)
         tot_n += torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
        
     return tot_loss / tot_n
@@ -381,7 +381,7 @@ def main():
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-            cache_prefix=name
+            cache_prefix=prefix
         )
         
         train_loader = DataLoader(

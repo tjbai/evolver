@@ -1,3 +1,4 @@
+import io
 import os
 import time
 import math
@@ -6,9 +7,9 @@ import pickle
 import random
 import logging
 
-import conllu
 import torch
 import torch.nn.functional as F
+import zstandard as zstd
 
 from tqdm import tqdm
 from simalign import SentenceAligner
@@ -90,12 +91,10 @@ class TrajectoryDataset(Dataset):
         return cls(traj_list, log_probs, **kwargs)
 
     def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
-        self.traj_input_ids = [
-            get_input_ids(t, max_len, tokenizer)
-            for t in tqdm(traj_list, desc='Tokenizing inputs')
-        ]
+        self.traj_input_ids = [get_input_ids(t, max_len, tokenizer) for t in tqdm(traj_list)]
         self.log_probs = log_probs
         self.limit = len(self.traj_input_ids) if limit is None else limit
+        self.max_len = max_len
        
     def __len__(self):
         return self.limit
@@ -115,25 +114,36 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         
+        # self.compressor = zstd.ZstdCompressor()
+        # self.decompressor = zstd.ZstdDecompressor()
         self.cache_prefix = cache_prefix
         self.cache_path = f'/scratch4/jeisner1/cache/' if torch.cuda.is_available() else 'cache'
         os.makedirs(self.cache_path, exist_ok=True)
         
-        for i, (traj_input_ids, traj) in tqdm(
-            enumerate(zip(self.traj_input_ids, traj_list)),
+        for i, traj in tqdm(
+            enumerate(traj_list),
             desc='Computing alignments'
         ):
-            path = f'{self.cache_path}/{self.cache_prefix}_{i}.pkl'
+            path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
             if os.path.exists(path): continue
             
-            traj_edit_tgts = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
-            with open(path, 'wb') as f:
-                pickle.dump((traj_input_ids, traj_edit_tgts), f)
+            data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
+            # buffer = io.BytesIO()
+            # pickle.dump(traj_edit_tgts, buffer)
+            # data = self.compressor.compress(buffer.getvalue())
+            
+            with open(path, 'wb') as f: pickle.dump(data, f)
         
     def __getitem__(self, idx):
-        with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.pkl', 'rb') as f:
-            traj_input_ids, traj_edit_tgts = pickle.load(f)
-            return traj_input_ids, traj_edit_tgts
+        with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.zst', 'rb') as f:
+            # buffer = io.BytesIO(self.decompressor.decompress(data))
+            op_tgts, tok_tgts, idx_tgts = pickle.load(f)
+            
+            return self.traj_input_ids[idx], (
+                F.one_hot(op_tgts, 5),
+                F.one_hot(tok_tgts, VOCAB_SIZE),
+                F.one_hot(idx_tgts, self.max_len)
+            )
     
 class Seq2SeqDataset(Dataset):
     
@@ -286,11 +296,13 @@ def get_edit_tgts(edit_seq, max_len):
         tok_tgts.extend([PAD_TOKEN_ID for _ in range(max_len-n)])
         idx_tgts.extend([0 for _ in range(max_len-n)])
         
-    return (
-        F.one_hot(torch.tensor(op_tgts[:max_len]), 5),
-        F.one_hot(torch.tensor(tok_tgts[:max_len]), VOCAB_SIZE),
-        F.one_hot(torch.tensor(idx_tgts[:max_len]), max_len)
-    )
+    # return (
+    #     F.one_hot(torch.tensor(op_tgts[:max_len]), 5),
+    #     F.one_hot(torch.tensor(tok_tgts[:max_len]), VOCAB_SIZE),
+    #     F.one_hot(torch.tensor(idx_tgts[:max_len]), max_len)
+    # )
+    
+    return op_tgts[:max_len], tok_tgts[:max_len], idx_tgts[:max_len]
     
 def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
     traj_edit_tgts = ([], [], [])
@@ -307,7 +319,7 @@ def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
         traj_tok_tgts.append(tok_tgts)
         traj_idx_tgts.append(idx_tgts)
         
-    return tuple(map(torch.stack, traj_edit_tgts))
+    return tuple(map(torch.tensor, traj_edit_tgts))
 
 ### to deprecate
     

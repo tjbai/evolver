@@ -1,7 +1,7 @@
 {
     "train": "data/ud/ud_train_2.0.jsonl",
     "eval": "data/ud/ud_dev_2.0.jsonl",
-    "notes": "turn on gradient clipping as some kind of normalization between classification heads",
+    "notes": "try an INS only run",
 
     "d_model": 512,
     "nhead": 8,
@@ -14,8 +14,8 @@
     "lr": 3e-4,
     "warmup_percent": 0.1,
     "clip_gradients": true,
-    "train_steps": 2000,
-    "eval_steps": 100,
+    "train_steps": 1000,
+    "eval_steps": 10,
     "batch_size": 64,
     "grad_accum_steps": 1,
     "checkpoint_at": 50,

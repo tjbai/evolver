@@ -7,8 +7,8 @@
     "max_len": 64,
     "dim_feedforward": 2048,
     "dropout": 0.1,
-    "encoder_layers": 6,
-    "decoder_layers": 6,
+    "encoder_layers": 12,
+    "decoder_layers": 0,
 
     "lr": 3e-4,
     "warmup_percent": 0.1,

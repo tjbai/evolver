@@ -389,8 +389,7 @@ def main():
             batch_size=config['batch_size'],
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
             collate_fn=collate_supervised,
-            num_workers=4,
-            prefetch_factor=2,
+            num_workers=0,
             pin_memory=True
         )
         

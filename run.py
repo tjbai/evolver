@@ -168,7 +168,7 @@ def particle_filter(
         sample_weight = posterior_probs - proposal_probs
         
         # C[i, j] = one_hot(B[i, A[i, j]]])
-        fn = lambda A, B, D: F.one_hot(B[torch.arange(B, device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
+        fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
        
         # TODO -- implement a fast(er) update 
         update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))

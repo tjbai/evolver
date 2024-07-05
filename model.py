@@ -244,13 +244,9 @@ class Evolver(nn.Module):
   
     def forward(
         self,
-        input_ids,          # source-side token ids, used to compute target-side embeddings
-        src,                # source-side embeddings, static if first in trajectory but dynamic otherwise
-        edit_tgts,          # target edits, either teacher-forced or PF-sampled
-        src_pad_mask,       # source-side pad token mask
-        tgt_pad_mask,       # target-side pad token mask (shouldn't matter because of causal decoder)
-        memory=None,
-        cache=None
+        input_ids, src, edit_tgts,
+        src_pad_mask, tgt_pad_mask,
+        memory=None, cache=None
     ):
         if self.training and memory is not None:
             raise Exception('encoder memory found during training')

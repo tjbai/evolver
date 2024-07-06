@@ -1,7 +1,7 @@
 {
     "train": "data/ud/ud_train_3.0.jsonl",
     "eval": "data/ud/ud_dev_3.0.jsonl",
-    "notes": "new dataset, just halve the sentence",
+    "notes": "go again, add per occurrence loss and increase eval",
 
     "d_model": 512,
     "nhead": 8,

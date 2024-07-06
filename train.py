@@ -97,7 +97,7 @@ def train_evolver(
         s = time.time()
         evolver.train()
         traj_loss, op_loss, tok_loss, idx_loss = \
-            evolver.traj_loss(traj_input_ids, traj_edit_tgts)
+            evolver.traj_loss(traj_input_ids, traj_edit_tgts, step=step)
             
         traj_loss.backward()
         record_grad_norms(evolver, step)

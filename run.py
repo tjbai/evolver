@@ -153,11 +153,7 @@ def particle_filter(
         # normalize proposal and sample
         logits = posterior / temperature
         proposal = F.log_softmax(logits, dim=-1)
-
-        # NOTE -- revert this
         samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
-        # samples = torch.zeros(B*M, 1, device=device, dtype=torch.long)
-
         posterior_probs = torch.gather(posterior.view(B*M, -1), dim=-1, index=samples)
         proposal_probs = torch.gather(proposal.view(B*M, -1), dim=-1, index=samples)
         
@@ -176,6 +172,11 @@ def particle_filter(
         ens_toks[update, :, i, :] = fn(samples, tok_ids[:, i, :], VOCAB_SIZE)[update]
         ens_idxs[update, :, i, :] = fn(samples, idx_ids[:, i, :], N)[update]
         weights[update] += sample_weight[update]
+       
+        # if torch.sum(update) > 0:
+        #     print('INS PROB', op_probs[:, :, -1, INS_ID], 'CPY PROB', op_probs[:, :, -1, CPY_ID])
+        #     print('PROB OF THIS TOKEN', tok_probs[torch.arange(B), :, -1, forced])
+        #     print('WEIGHT DIFF', posterior_probs[update], proposal_probs[update], sample_weight[update])
         
         eos = forced.eq(EOS_TOKEN_ID)
         ens_ops[eos, :, i, EOS_ID] = 1

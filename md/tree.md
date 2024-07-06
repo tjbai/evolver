@@ -42,3 +42,17 @@ sup-ud-2.0: basic with supervision
 ud-2.3: more exploration
 ud-2.4: clip grads
 ar-ud-2.0: decoder-only baseline
+ud-3.*: halve the sequence noising, sort of like diffusion forcing
+
+## ud-3.*
+
+eval results look bad... inspecting sup-ud-3.0 shows pretty good adherence to the pattern, except for SUB(..., EOS) appearing in random places
+
+not really actually. majority of the loss comes from incorrect token prediction. we get the correct operation generally. 
+
+we observe a gradual shift in probability mass from CPY to INS as we get closer to the "break even" then a sudden phase shift
+
+think about an approach where we take index/token loss regardless of what the operation is.
+-> operation breaks ties, but the model still knows what token it should insert and where to look in the previous sequence
+-> addresses hypothesis that the token loss doesn't get as low because less signal in the training data?
+    (added per-occurrence plotting to verify this hypothesis, because otherwise our values are artifically deflated)

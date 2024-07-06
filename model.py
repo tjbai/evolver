@@ -1,3 +1,4 @@
+import wandb
 import logging
 from time import time
 from functools import wraps
@@ -17,6 +18,10 @@ from constants import (
 
 logging.basicConfig()
 logger = logging.getLogger('train')
+
+def log(data, step=None):
+    if wandb.run is not None: wandb.log(data, step=step)
+    else: print(f"Step {step}: {data}")
 
 def timing(f):
     @wraps(f)
@@ -293,8 +298,9 @@ class Evolver(nn.Module):
         
         return op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n
 
-    def traj_loss(self, traj_input_ids, traj_edit_tgts):
-        traj_op_tot = traj_tok_tot = traj_idx_tot = 0 
+    def traj_loss(self, traj_input_ids, traj_edit_tgts, step=None):
+        traj_op_tot = traj_tok_tot = traj_idx_tot = 0
+        traj_op_n = traj_tok_n = traj_idx_n = 0
         traj_src, traj_pad_mask = self.get_src(traj_input_ids)
         src = traj_src[:, 0, :]
         
@@ -311,10 +317,17 @@ class Evolver(nn.Module):
             op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
             
             traj_loss += (op_tot / op_n) + (tok_tot / tok_n) + (idx_tot / idx_n)
-            traj_op_tot += op_tot
-            traj_tok_tot += tok_tot
-            traj_idx_tot += idx_tot
+            
+            traj_op_tot += op_tot; traj_op_n += op_n
+            traj_tok_tot += tok_tot; traj_tok_n += tok_n
+            traj_idx_tot += idx_tot; traj_idx_n += idx_n
       
+        log({
+            'train/per_occ_op_loss': traj_op_tot / traj_op_n,
+            'train/per_occ_tok_loss': traj_tok_tot / traj_tok_n,
+            'train/per_occ_idx_loss': traj_idx_tot / traj_idx_n,
+        }, step=step)
+     
         # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N

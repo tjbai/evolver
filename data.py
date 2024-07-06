@@ -114,8 +114,6 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         
-        # self.compressor = zstd.ZstdCompressor()
-        # self.decompressor = zstd.ZstdDecompressor()
         self.cache_prefix = cache_prefix
         self.cache_path = f'/scratch4/jeisner1/cache/' if torch.cuda.is_available() else 'cache'
         os.makedirs(self.cache_path, exist_ok=True)
@@ -125,25 +123,19 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             desc='Computing alignments'
         ):
             path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
-            if os.path.exists(path):
-                logger.info(f'hit {self.cache_prefix} cache')
-                continue
+            if os.path.exists(path): continue
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
-            # buffer = io.BytesIO()
-            # pickle.dump(traj_edit_tgts, buffer)
-            # data = self.compressor.compress(buffer.getvalue())
-            
             with open(path, 'wb') as f: pickle.dump(data, f)
         
     def __getitem__(self, idx):
         with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.zst', 'rb') as f:
-            # buffer = io.BytesIO(self.decompressor.decompress(data))
             op_tgts, tok_tgts, idx_tgts = pickle.load(f)
             
             return self.traj_input_ids[idx], (
                 F.one_hot(op_tgts, 5),
-                F.one_hot(tok_tgts, VOCAB_SIZE),
+                # F.one_hot(tok_tgts, VOCAB_SIZE),
+                F.one_hot(self.traj_input_ids[idx], VOCAB_SIZE)[1:],
                 F.one_hot(idx_tgts, self.max_len)
             )
     
@@ -213,25 +205,16 @@ class StratifiedInfiniteSampler(Sampler):
     
 ### logging utilities
 
-def to_verbose_str(op, tok, idx, prev_toks, tokenizer):
-    op = OP_VERB[op]
-    if op == 'PAD' or op == 'EOS': edit = op
-    elif tok and idx: edit = f'SUB({tok}, {prev_toks[idx]})'
-    elif tok: edit = f'INS({tokenizer.decode(tok)})'
-    elif idx: edit = f'CPY({prev_toks[idx]})'
-    return edit
-
 def to_str(op, tok, idx, prev_toks=None, tokenizer=None):
     op = OP_VERB[op]
     if op == 'PAD' or op == 'EOS': return op
-    
-    if idx: idx_str = idx if prev_toks is None else prev_toks[idx-1]
-    if tok: tok_str = tok if tokenizer is None else ''.join(tokenizer.decode(tok).split())
+    idx_str = idx if prev_toks is None else prev_toks[idx-1]
+    tok_str = tok if tokenizer is None else ''.join(tokenizer.decode(tok).split())
+    return f'{op}({tok_str}, {idx_str})'
     
     if tok and idx: return f'SUB({tok_str}, {idx_str})'
     elif tok: return f'INS({tok_str})'
     elif idx: return f'CPY({idx_str})'
-    
     return 'UNK'    
 
 def elaborate(traj_edit_tgts, batch_first=True):

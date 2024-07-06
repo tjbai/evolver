@@ -126,7 +126,7 @@ def train_evolver(
                 'model': evolver.state_dict(),
                 'optim': optim.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
-                'wandb_run_id': wandb.run.id
+                'wandb_run_id': None if wandb.run is None else wandb.run.id
             }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
@@ -232,6 +232,8 @@ def init_run(prefix, name, device, local, config):
             d_model=config['d_model'],
             nhead=config['nhead'],
             max_len=config['max_len'],
+            dropout=config['dropout'],
+            dim_feedforward=config['dim_feedforward'],
             encoder_layers=config['encoder_layers'],
             decoder_layers=config['decoder_layers'],
             device=device

@@ -14,9 +14,9 @@
     "warmup_percent": 0.0,
     "clip_gradients": false,
     "train_steps": 500,
-    "eval_steps": 4,
+    "eval_steps": 50,
     "batch_size": 1,
     "grad_accum_steps": 1,
-    "checkpoint_at": 1e9,
-    "eval_at": 10
+    "checkpoint_at": 500,
+    "eval_at": 100
 }

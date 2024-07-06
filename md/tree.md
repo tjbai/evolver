@@ -56,3 +56,6 @@ think about an approach where we take index/token loss regardless of what the op
 -> operation breaks ties, but the model still knows what token it should insert and where to look in the previous sequence
 -> addresses hypothesis that the token loss doesn't get as low because less signal in the training data?
     (added per-occurrence plotting to verify this hypothesis, because otherwise our values are artifically deflated)
+
+try to compute token loss for every index (even when CPY operation is supervised)
+-> for some reason makes loss worse

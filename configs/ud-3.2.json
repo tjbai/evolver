@@ -1,0 +1,28 @@
+{
+    "train": "data/ud/ud_train_3.0.jsonl",
+    "eval": "data/ud/ud_train_3.0.jsonl",
+    "notes": "use train set as eval, see if this is a generalization problem",
+
+    "d_model": 512,
+    "nhead": 8,
+    "max_len": 64,
+    "dim_feedforward": 2048,
+    "dropout": 0.1,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+
+    "lr": 3e-4,
+    "warmup_percent": 0.1,
+    "clip_gradients": false,
+    "train_steps": 1000,
+    "eval_steps": 10,
+    "batch_size": 64,
+    "grad_accum_steps": 1,
+    "checkpoint_at": 50,
+    "eval_at": 50,
+
+    "num_particles": 5,
+    "threshold": 1,
+    "temperature": 1,
+    "resample_at": 4
+}

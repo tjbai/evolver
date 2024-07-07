@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [ $# -eq 0 ]; then
-    echo "Usage: $0 <config_path>"
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "Usage: $0 <config_path> [-r]"
     exit 1
 fi
 
@@ -25,4 +25,8 @@ conda activate evo
 python3 train.py --config $config_path --device cuda
 EOF
 
-echo "generated: ${job_name}_slurm.sh"
+echo "generated: ${job_name}.sh"
+
+if [ "$2" = "-r" ]; then
+    sbatch "slurm/${job_name}.sh"
+fi

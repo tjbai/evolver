@@ -359,7 +359,7 @@ def main():
         
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=config['batch_size'] / 4,
+            batch_size=config['batch_size'] // 4,
             sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
             collate_fn=collate_unsupervised
         )

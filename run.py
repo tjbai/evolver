@@ -26,7 +26,7 @@ logger.setLevel(logging.DEBUG if ('DEBUG' in os.environ) else logging.INFO)
 
 def sample_trajectory(
     evolver, traj_input_ids,
-    num_particles, threshold, temperature, resample_at
+    num_particles, threshold=0, temperature=1, resample_at=1
 ):
     B, T, N = traj_input_ids.shape
     device = traj_input_ids.device

@@ -60,19 +60,23 @@ def get_input_ids(trajectory, max_len, tokenizer):
         return_tensors='pt'
     )['input_ids']
     
+def sum_tokens(traj_input_ids):
+    return sum(torch.sum(traj[-1] != PAD_TOKEN_ID) for traj in traj_input_ids)
+    
 def collate_unsupervised(x):
     traj_input_ids, log_probs = zip(*x)
+    toks = sum_tokens(traj_input_ids)
     T = max(traj.shape[0] for traj in traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     log_probs = torch.tensor(log_probs)
-    return traj_input_ids, log_probs, None
+    return traj_input_ids, log_probs, None, toks
 
 def collate_supervised(x):
-    traj_input_ids, traj_edit_tgts = zip(*x)
     T = max(traj.shape[0] for traj in traj_input_ids)
+    toks = sum_tokens(traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
-    return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts)))
+    return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts))), toks
     
 class TrajectoryDataset(Dataset):
     
@@ -104,8 +108,12 @@ class TrajectoryDataset(Dataset):
     
 class SupervisedTrajectoryDataset(TrajectoryDataset):
 
-    def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None, cache_prefix=None):
+    def __init__(
+        self, traj_list, log_probs, max_len, tokenizer,
+        limit=None, cache_prefix=None, all_tokens=False
+    ):
         super().__init__(traj_list, log_probs, max_len, tokenizer, limit)
+        self.all_tokens = all_tokens
         
         aligner = SentenceAligner(
             model='bert-base-uncased',
@@ -132,10 +140,12 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
         with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.zst', 'rb') as f:
             op_tgts, tok_tgts, idx_tgts = pickle.load(f)
             
+            tok_tgts = F.one_hot(tok_tgts, VOCAB_SIZE) if self.all_tokens else \
+                       F.one_hot(self.traj_input_ids[idx], VOCAB_SIZE)[1:]
+            
             return self.traj_input_ids[idx], (
                 F.one_hot(op_tgts, 5),
-                # F.one_hot(tok_tgts, VOCAB_SIZE),
-                F.one_hot(self.traj_input_ids[idx], VOCAB_SIZE)[1:],
+                tok_tgts,
                 F.one_hot(idx_tgts, self.max_len)
             )
     

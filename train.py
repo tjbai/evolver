@@ -70,7 +70,7 @@ def train_evolver(
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
     device='cuda', name='test', start_step=0
 ):
-    for step, (traj_input_ids, _, traj_edit_tgts) in tqdm(
+    for step, (traj_input_ids, _, traj_edit_tgts, _) in tqdm(
         enumerate(train_loader, start=start_step),
         total=train_steps
     ):
@@ -140,24 +140,21 @@ def evolver_elbo(evolver, eval_loader, eval_steps, device):
     tot_loss = 0
     tot_n = 0
     
-    for step, (traj_input_ids, log_posterior, _) in enumerate(eval_loader):
+    for step, (traj_input_ids, log_posterior, _, n) in enumerate(eval_loader):
         if step >= eval_steps: break
         
         traj_input_ids = traj_input_ids.to(device)
         log_posterior = log_posterior.to(device)
         
-        _, log_likelihood = sample_trajectory(
-            evolver, traj_input_ids,
-            num_particles=1, threshold=0, temperature=0.5, resample_at=1e9
-        )
-        
+        _, log_likelihood = sample_trajectory(evolver, traj_input_ids, num_particles=1, temperature=0.5)
         tot_loss += torch.sum(log_likelihood - log_posterior)
-        tot_n += torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
+        tot_n += n
        
     return tot_loss / tot_n
 
 def train_ar(
-    model, optim, lr_scheduler, train_loader, eval_loader,
+    model, optim, lr_scheduler,
+    train_loader, eval_loader,
     train_steps, eval_steps, grad_accum_steps,
     checkpoint_at, eval_at,
     device, name,
@@ -223,16 +220,15 @@ def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
     tot_loss = 0
     tot_n = 0
     
-    for step, (traj_input_ids, log_posterior, _) in enumerate(eval_loader):
+    for step, (traj_input_ids, log_posterior, _, n) in enumerate(eval_loader):
         if step >= eval_steps: break
         
         traj_input_ids = traj_input_ids.to(device)
         log_posterior = log_posterior.to(device)
         
         log_likelihood = traj_likelihood(model, traj_input_ids)
-        
-        tot_loss += torch.sum(log_likelihood - log_posterior)
-        tot_n += torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
+        tot_loss += log_likelihood - torch.sum(log_posterior)
+        tot_n += n
        
     return tot_loss / tot_n
 
@@ -430,7 +426,8 @@ def main():
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-            cache_prefix=prefix
+            cache_prefix=prefix,
+            all_tokens=config['all_tokens']
         )
         
         train_loader = DataLoader(

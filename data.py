@@ -139,7 +139,7 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
                 F.one_hot(idx_tgts, self.max_len)
             )
     
-class Seq2SeqDataset(Dataset):
+class SequenceDataset(Dataset):
     
     @classmethod
     def from_trajectories(cls, path, denoising=True, **kwargs):

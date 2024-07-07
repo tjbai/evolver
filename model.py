@@ -422,7 +422,7 @@ class Transformer(nn.Module):
         tok_probs = F.log_softmax(tok_logits, dim=-1)
         return tok_probs
     
-    def loss(self, input_ids, output_ids):
+    def loss(self, input_ids, output_ids=None):
         src, src_pad_mask = self.get_src(input_ids)
         
         if output_ids is None:

@@ -18,14 +18,14 @@ from tqdm import tqdm
 
 from constants import PAD_TOKEN_ID
 from model import Evolver, Transformer
-from run import sample_trajectory, traj_likelihood
+from run import sample_trajectory
 from data import (
     elaborate,
     collate_supervised,
     collate_unsupervised,
     TrajectoryDataset,
     SupervisedTrajectoryDataset,
-    Seq2SeqDataset,
+    SequenceDataset,
     StratifiedInfiniteSampler
 )
 
@@ -173,7 +173,7 @@ def train_ar(
         output_ids = output_ids.to(device)
        
         model.train() 
-        if input_is_tgt: tot_loss, n = model.loss(output_ids, None)
+        if input_is_tgt: tot_loss, n = model.loss(output_ids)
         else: tot_loss, n = model.loss(input_ids, output_ids)
         loss = tot_loss / n 
         loss.backward()
@@ -198,10 +198,10 @@ def train_ar(
             }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
-            if isinstance(eval_loader, TrajectoryDataset):
+            if isinstance(eval_loader.dataset, TrajectoryDataset):
                 eval_loss = ar_elbo(model, eval_loader, eval_steps, device)
-            elif isinstance(eval_loader, Seq2SeqDataset):
-                eval_loss = ar_likelihood(model, eval_loader, input_is_tgt, device)
+            elif isinstance(eval_loader.dataset, SequenceDataset):
+                eval_loss = ar_likelihood(model, eval_loader, eval_steps, input_is_tgt, device)
             log({'eval/loss': eval_loss.item()}, step=step)
 
 def traj_likelihood(model, traj_input_ids):
@@ -237,19 +237,22 @@ def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
     return tot_loss / tot_n
 
 @torch.no_grad()
-def ar_likelihood(model, eval_loader: Seq2SeqDataset, input_is_tgt, device):
+def ar_likelihood(model, eval_loader: SequenceDataset, eval_steps, input_is_tgt, device):
     model.eval()
     tot_loss = 0
     tot_n = 0
     
-    with torch.no_grad():
-        for input_ids, output_ids in eval_loader:
-            input_ids = input_ids.to(device)
-            output_ids = output_ids.to(device)
-            if input_is_tgt: loss, n = model.loss(output_ids, None)
-            else: loss, n = model.loss(input_ids, output_ids)
-            tot_loss += loss
-            tot_n += n
+    for step, (input_ids, output_ids) in enumerate(eval_loader):
+        if step >= eval_steps: break
+    
+        input_ids = input_ids.to(device)
+        output_ids = output_ids.to(device)
+        
+        if input_is_tgt: loss, n = model.loss(output_ids)
+        else: loss, n = model.loss(input_ids, output_ids)
+        
+        tot_loss += loss
+        tot_n += n
             
     eval_loss = tot_loss / tot_n
     return -eval_loss
@@ -339,7 +342,7 @@ def main():
        
     # autoregressive seq2seq 
     if prefix.startswith('ar-d'):
-        train_dataset = Seq2SeqDataset.from_trajectories(
+        train_dataset = SequenceDataset.from_trajectories(
             path=config['train'],
             denoising=True,
             max_len=config['max_len'],
@@ -360,7 +363,7 @@ def main():
         
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=config['batch_size'],
+            batch_size=config['batch_size'] / 4,
             sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
             collate_fn=collate_unsupervised
         )
@@ -381,7 +384,7 @@ def main():
        
     ### baseline autoregressive 
     elif prefix.startswith('ar'):
-        train_dataset = Seq2SeqDataset.from_trajectories(
+        train_dataset = SequenceDataset.from_trajectories(
             path=config['train'],
             denoising=True,
             max_len=config['max_len'],
@@ -394,7 +397,7 @@ def main():
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
         )
         
-        eval_dataset = Seq2SeqDataset.from_trajectories(
+        eval_dataset = SequenceDataset.from_trajectories(
             path=config['eval'],
             denoising=True,
             max_len=config['max_len'],
@@ -411,6 +414,7 @@ def main():
             model, optim, lr_scheduler,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
+            eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],

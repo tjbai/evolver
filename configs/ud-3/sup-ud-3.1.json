@@ -1,7 +1,7 @@
 {
     "train": "data/ud/ud_train_3.0.jsonl",
     "eval": "data/ud/ud_dev_3.0.jsonl",
-    "notes": "go again after fixing loss calculation",
+    "notes": "go again after fixing loss calculation + all_tokens=True",
 
     "d_model": 512,
     "nhead": 8,
@@ -21,5 +21,5 @@
     "checkpoint_at": 50,
     "eval_at": 50,
 
-    "all_tokens": false
+    "all_tokens": true
 }

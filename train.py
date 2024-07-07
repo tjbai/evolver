@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from constants import PAD_TOKEN_ID
 from model import Evolver, Transformer
-from run import sample_trajectory
+from run import sample_trajectory, traj_likelihood
 from data import (
     elaborate,
     collate_supervised,
@@ -131,11 +131,11 @@ def train_evolver(
             
         if (step + 1) % eval_at == 0:
             s = time.time()
-            eval_loss = evaluate_evolver(evolver, eval_loader, eval_steps, device)
+            eval_loss = evolver_elbo(evolver, eval_loader, eval_steps, device)
             log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
 
 @torch.no_grad()
-def evaluate_evolver(evolver, eval_loader, eval_steps, device):
+def evolver_elbo(evolver, eval_loader, eval_steps, device):
     evolver.eval()
     tot_loss = 0
     tot_n = 0
@@ -158,8 +158,10 @@ def evaluate_evolver(evolver, eval_loader, eval_steps, device):
 
 def train_ar(
     model, optim, lr_scheduler, train_loader, eval_loader,
-    train_steps, grad_accum_steps, checkpoint_at, eval_at,
-    input_is_tgt, device, name, start_step
+    train_steps, eval_steps, grad_accum_steps,
+    checkpoint_at, eval_at,
+    device, name,
+    start_step, input_is_tgt
 ):
     for step, (input_ids, output_ids) in tqdm(
         enumerate(train_loader, start=start_step),
@@ -196,22 +198,62 @@ def train_ar(
             }, f'{save_path}/{name}-{step+1}.pt')
             
         if (step + 1) % eval_at == 0:
-            model.eval()
-            tot_loss = 0
-            tot_n = 0
-            
-            with torch.no_grad():
-                for input_ids, output_ids in eval_loader:
-                    input_ids = input_ids.to(device)
-                    output_ids = output_ids.to(device)
-                    if input_is_tgt: loss, n = model.loss(output_ids, None)
-                    else: loss, n = model.loss(input_ids, output_ids)
-                    tot_loss += loss
-                    tot_n += n
-                    
-            eval_loss = tot_loss / tot_n
-            log({'eval/loss': -eval_loss.item()}, step=step)
+            if isinstance(eval_loader, TrajectoryDataset):
+                eval_loss = ar_elbo(model, eval_loader, eval_steps, device)
+            elif isinstance(eval_loader, Seq2SeqDataset):
+                eval_loss = ar_likelihood(model, eval_loader, input_is_tgt, device)
+            log({'eval/loss': eval_loss.item()}, step=step)
 
+def traj_likelihood(model, traj_input_ids):
+    B, T, _ = traj_input_ids.shape
+    tot_loss = tot_n = 0
+    
+    for i in range(T-1):
+        input_ids = traj_input_ids[:, i]
+        output_ids = traj_input_ids[:, i+1]
+        
+        loss, _ = model.loss(input_ids, output_ids)
+        tot_loss += loss
+        
+    return -tot_loss
+            
+@torch.no_grad()
+def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
+    model.eval()
+    tot_loss = 0
+    tot_n = 0
+    
+    for step, (traj_input_ids, log_posterior, _) in enumerate(eval_loader):
+        if step >= eval_steps: break
+        
+        traj_input_ids = traj_input_ids.to(device)
+        log_posterior = log_posterior.to(device)
+        
+        log_likelihood = traj_likelihood(model, traj_input_ids)
+        
+        tot_loss += torch.sum(log_likelihood - log_posterior)
+        tot_n += torch.sum(traj_input_ids[:, -1] != PAD_TOKEN_ID)
+       
+    return tot_loss / tot_n
+
+@torch.no_grad()
+def ar_likelihood(model, eval_loader: Seq2SeqDataset, input_is_tgt, device):
+    model.eval()
+    tot_loss = 0
+    tot_n = 0
+    
+    with torch.no_grad():
+        for input_ids, output_ids in eval_loader:
+            input_ids = input_ids.to(device)
+            output_ids = output_ids.to(device)
+            if input_is_tgt: loss, n = model.loss(output_ids, None)
+            else: loss, n = model.loss(input_ids, output_ids)
+            tot_loss += loss
+            tot_n += n
+            
+    eval_loss = tot_loss / tot_n
+    return -eval_loss
+            
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
@@ -310,23 +352,24 @@ def main():
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
         )
         
-        eval_dataset = Seq2SeqDataset.from_trajectories(
+        eval_dataset = TrajectoryDataset.from_disk(
             path=config['eval'],
-            denoising=True,
             max_len=config['max_len'],
-            tokenizer=tokenizer,
+            tokenizer=tokenizer
         )
         
         eval_loader = DataLoader(
             eval_dataset,
             batch_size=config['batch_size'],
-            shuffle=True
+            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
+            collate_fn=collate_unsupervised
         )
 
         train_ar(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
             train_steps=config['train_steps'],
+            eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],

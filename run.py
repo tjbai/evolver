@@ -213,21 +213,6 @@ def particle_filter(
     
     return edit_tgts, src, weights[torch.arange(B, device=device), samples]
 
-def baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
-    model.eval()
-    samples, log_posteriors = zip(*[noise(observed) for _ in range(num_samples)])
-    T = max(len(s) for s in samples)
-    
-    traj_input_ids = torch.stack(
-        [pad_traj_input_ids(
-            get_input_ids(s, model.max_len, tokenizer), T
-        ).to(device) for s in samples]
-    )
-   
-    log_likelihoods = baseline_likelihood(model, traj_input_ids) 
-    tot = log_likelihoods - log_posteriors
-    return torch.sum(tot) / num_samples
-
 @torch.no_grad()
 def fast_sample(
     evolver,
@@ -243,7 +228,7 @@ def fast_sample(
     src = src.unsqueeze(1).expand(-1, M, -1, -1).reshape(B*M, N, -1)
     src_pad_mask = src_pad_mask.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     
-    log_probs = torch.zeros(B, M, device=device)
+    log_probs = torch.zeros(B*M, device=device)
     alive = torch.ones(B*M, dtype=torch.bool)
     
     ens_ops = torch.zeros(B*M, N, 5, dtype=torch.long, device=device)
@@ -274,25 +259,33 @@ def fast_sample(
         toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
         
-        # handle pad and eos   
-        alive &= ~ops.eq(EOS_ID)
+        # handle pad
         ens_ops[~alive, i, PAD_ID] = 1
-        ens_ops[ops.eq(EOS_ID), i, EOS_ID] = 1
         ens_toks[~alive, i, PAD_TOKEN_ID] = 1
         ens_idxs[~alive, i, 0] = 1
         
+        # handle eos 
+        ens_ops[~alive & ops.eq(EOS_ID), i, EOS_ID] = 1
+        ens_toks[~alive & ops.eq(EOS_ID), i, PAD_TOKEN_ID] = 1
+        ens_idxs[~alive & ops.eq(EOS_ID), i, 0] = 1
+        
         # update the living
+        alive &= ~ops.eq(EOS_ID)
         ens_ops[torch.arange(B*M, device=device)[alive], i, ops[alive]] = 1
         ens_toks[torch.arange(B*M, device=device)[alive], i, toks[alive]] = 1
         ens_idxs[torch.arange(B*M, device=device)[alive], i, idxs[alive]] = 1
        
         # update log probs 
-        log_probs += torch.gather(op_probs, 1, ops.unsqueeze(1))
-        log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += torch.gather(tok_probs, 1, toks.unsqueeze(1))
-        log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += torch.gather(idx_probs, 1, idxs.unsqueeze(1))
+        log_probs += op_probs[torch.arange(B*M), ops]
+        log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
+        log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
         
     return (
-        (ens_ops.view(B, M, -1), ens_toks.view(B, M, -1), ens_idxs.view(B, M, -1)),
+        (
+            ens_ops.view(B, M, N, -1),
+            ens_toks.view(B, M, N, -1),
+            ens_idxs.view(B, M, N, -1)
+        ),
         log_probs.view(B, M)
     )
 
@@ -315,7 +308,7 @@ def apply_edits(input_ids, edits):
     
     return res
    
-### a bunch of old unused code
+### to deprecate
 
 def _decode_stochastic(edit_probs):
     return tuple(map(lambda x: torch.multinomial(torch.exp(x), num_samples=1).squeeze(), edit_probs)) 
@@ -519,31 +512,17 @@ def _sample_trajectory(
     
     return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob
 
-def baseline_likelihood(model, traj_input_ids):
-    B, T, _ = traj_input_ids.shape
-    traj_src, traj_pad_mask = model.get_src(traj_input_ids)
-    log_probs = torch.zeros(B)
+def _baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
+    model.eval()
+    samples, log_posteriors = zip(*[noise(observed) for _ in range(num_samples)])
+    T = max(len(s) for s in samples)
     
-    for i in range(T-1):
-        src = traj_src[:, i, :]
-        tgt = traj_src[:, i+1, :]
-        src_pad_mask = traj_pad_mask[:, i, :]
-        tgt_pad_mask = traj_pad_mask[:, i+1, :]
-      
-        cache = None
-        memory = None
-        for j in range(1, model.max_len):
-            forced = traj_input_ids[:, i+1, j]
-            
-            tok_logits, cache, memory = model.forward(
-                src, tgt[:, :j, :],
-                src_pad_mask, tgt_pad_mask,
-                memory, cache
-            )
-            
-            tok_probs = F.log_softmax(tok_logits, dim=-1)
-            probs = torch.gather(tok_probs, dim=2, index=forced.view(1, 1, B)).squeeze()
-            probs[forced.eq(PAD_TOKEN_ID)] = 0
-            log_probs += probs
-        
-    return log_probs
+    traj_input_ids = torch.stack(
+        [pad_traj_input_ids(
+            get_input_ids(s, model.max_len, tokenizer), T
+        ).to(device) for s in samples]
+    )
+   
+    log_likelihoods = baseline_likelihood(model, traj_input_ids) 
+    tot = log_likelihoods - log_posteriors
+    return torch.sum(tot) / num_samples

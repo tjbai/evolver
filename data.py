@@ -72,8 +72,9 @@ def collate_unsupervised(x):
     return traj_input_ids, log_probs, None, toks
 
 def collate_supervised(x):
-    T = max(traj.shape[0] for traj in traj_input_ids)
+    traj_input_ids, traj_edit_tgts = zip(*x)
     toks = sum_tokens(traj_input_ids)
+    T = max(traj.shape[0] for traj in traj_input_ids)
     traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
     traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
     return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts))), toks
@@ -131,7 +132,9 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             desc='Computing alignments'
         ):
             path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
-            if os.path.exists(path): continue
+            if os.path.exists(path):
+                logger.info('hit cache')
+                continue
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
             with open(path, 'wb') as f: pickle.dump(data, f)

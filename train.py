@@ -426,7 +426,7 @@ def main():
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-            cache_prefix=prefix,
+            cache_prefix=prefix.split('.')[0], # don't ask
             all_tokens=config['all_tokens']
         )
         

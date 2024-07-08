@@ -1,8 +1,7 @@
 {
     "train": "data/ud/ud_train_2.0.jsonl",
     "eval": "data/ud/ud_dev_2.0.jsonl",
-    "from_checkpoint": "/scratch4/jeisner1/checkpoints/ud-2.0_20240702_192232-200.pt",
-    "resume": true,
+    "notes": "go again with fixed loss unsupervised",
 
     "d_model": 512,
     "nhead": 8,
@@ -15,8 +14,8 @@
     "lr": 3e-4,
     "warmup_percent": 0.1,
     "clip_gradients": false,
-    "train_steps": 2000,
-    "eval_steps": 5,
+    "train_steps": 1000,
+    "eval_steps": 50,
     "batch_size": 64,
     "grad_accum_steps": 1,
     "checkpoint_at": 50,

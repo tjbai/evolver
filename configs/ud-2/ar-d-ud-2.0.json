@@ -7,15 +7,16 @@
     "max_len": 64,
     "dim_feedforward": 2048,
     "dropout": 0.1,
-    "encoder_layers": 6,
-    "decoder_layers": 6,
+    "encoder_layers": 12,
+    "decoder_layers": 0,
 
     "lr": 3e-4,
-    "train_steps": 5000,
     "warmup_percent": 0.1,
     "clip_gradients": false,
-    "batch_size": 128,
+    "train_steps": 1000,
+    "eval_steps": 100,
+    "batch_size": 256,
     "grad_accum_steps": 1,
-    "checkpoint_at": 200,
-    "eval_at": 200
+    "checkpoint_at": 50,
+    "eval_at": 50
 }

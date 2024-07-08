@@ -1,6 +1,7 @@
 {
     "train": "data/ud/ud_train_2.0.jsonl",
     "eval": "data/ud/ud_dev_2.0.jsonl",
+    "notes": "go again with fixed loss on 2.0",
 
     "d_model": 512,
     "nhead": 8,
@@ -14,9 +15,11 @@
     "warmup_percent": 0.1,
     "clip_gradients": false,
     "train_steps": 1000,
-    "eval_steps": 10,
+    "eval_steps": 50,
     "batch_size": 64,
     "grad_accum_steps": 1,
     "checkpoint_at": 50,
-    "eval_at": 50
+    "eval_at": 50,
+
+    "all_tokens": false
 }

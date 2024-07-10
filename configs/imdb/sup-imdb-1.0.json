@@ -1,0 +1,25 @@
+{
+    "train": "data/ud/ud_train_3.0.jsonl",
+    "eval": "data/ud/ud_dev_3.0.jsonl",
+    "notes": "go again after fixing loss calculation",
+
+    "d_model": 512,
+    "nhead": 8,
+    "max_len": 512,
+    "dim_feedforward": 2048,
+    "dropout": 0.1,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+    "lr": 3e-4,
+
+    "warmup_percent": 0.1,
+    "clip_gradients": true,
+    "train_steps": 4000,
+    "eval_steps": 50,
+    "batch_size": 8,
+    "grad_accum_steps": 1,
+    "checkpoint_at": 400,
+    "eval_at": 100,
+
+    "all_tokens": false
+}

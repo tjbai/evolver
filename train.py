@@ -92,7 +92,7 @@ def train_evolver(
                 num_particles, threshold, temperature, resample_at
             )
             log({'train/e_time': time.time()-s}, step=step)
-        
+            
         # M-step
         s = time.time()
         evolver.train()

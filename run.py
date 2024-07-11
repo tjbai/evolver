@@ -151,9 +151,21 @@ def particle_filter(
         posterior[:, :, N+1:] = op_probs[:, :, -1, SUB_ID].unsqueeze(-1) + tok_probs[torch.arange(B), :, -1, forced].unsqueeze(-1) + idx_probs[:, :, -1, :]
        
         # normalize proposal and sample
+<<<<<<< Updated upstream
         logits = posterior / temperature
         proposal = F.log_softmax(logits, dim=-1)
         samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
+=======
+        
+        # NOTE -- REVERT THIS, FORCE INS
+        logits = posterior
+        logits[:, :, 1:] = -1e9
+        proposal = F.log_softmax(logits / temperature, dim=-1)
+        
+        # samples = torch.multinomial(torch.exp(proposal.view(B*M, -1)), 1)
+        samples = torch.zeros(B*M, 1, device=device, dtype=torch.long)
+        
+>>>>>>> Stashed changes
         posterior_probs = torch.gather(posterior.view(B*M, -1), dim=-1, index=samples)
         proposal_probs = torch.gather(proposal.view(B*M, -1), dim=-1, index=samples)
         

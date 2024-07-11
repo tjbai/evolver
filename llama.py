@@ -39,10 +39,10 @@ def main():
     model = 'meta-llama/Meta-Llama-3-8B-Instruct'
     
     dataset = load_dataset(data_path)
-    train_data, eval_data = train_test_split(dataset, test_size=0.1, seed=69420) 
+    train_data, eval_data = train_test_split(dataset, test_size=0.1, seed=40)
     
     tokenizer = AutoTokenizer.from_pretrained(model)
-    collator = DataCollatorForCompletionOnlyLM(response_template='<|start_header_id|>system<|end_header_id|>', tokenizer=tokenizer)
+    collator = DataCollatorForCompletionOnlyLM(response_template='<|start_header_id|>assistant<|end_header_id|>', tokenizer=tokenizer)
     
     config = SFTConfig(
         learning_rate=2e-5,
@@ -50,7 +50,7 @@ def main():
         gradient_accumulation_steps=1,
         max_steps=300,
         warmup_steps=30,
-        output_dir="./results",
+        output_dir="/scratch4/jeisner1/checkpoints",
         logging_steps=10,
         evaluation_strategy="steps",
         eval_steps=50,

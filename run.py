@@ -239,17 +239,29 @@ def fast_sample(
     ens_ops[:, 0, INS_ID] = 1
     ens_toks[:, 0, BOS_TOKEN_ID] = 1
     ens_idxs[:, 0, 0] = 1
+    
+    # initialize PAD everywhere else 
+    ens_ops[:, 1:, PAD_ID] = 1
    
     memory = cache = None
     for i in range(1, N):
+        
+        # handle pad
+        ens_ops[~alive, i, PAD_ID] = 1
+        ens_toks[~alive, i, PAD_TOKEN_ID] = 1
+        ens_idxs[~alive, i, 0] = 1
+        
+        if not torch.any(alive): break
+        
         edit_probs, _, memory, cache = evolver.forward(
-            batch_ids.view(B*M, N),
-            src.view(B*M, N, -1),
-            (ens_ops, ens_toks, ens_idxs),
-            src_pad_mask.view(B*M, N),
+            batch_ids, src,
+            (ens_ops[:, :i],
+            ens_toks[:, :i],
+            ens_idxs[:, :i]),
+            src_pad_mask,
             None, memory, cache
         )
-       
+    
         op_probs, tok_probs, idx_probs = tuple(map(
             lambda x: x[:, -1],
             edit_probs
@@ -258,34 +270,38 @@ def fast_sample(
         ops = torch.multinomial(torch.exp(op_probs), num_samples=1).squeeze()
         toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
-        
-        # handle pad
-        ens_ops[~alive, i, PAD_ID] = 1
-        ens_toks[~alive, i, PAD_TOKEN_ID] = 1
-        ens_idxs[~alive, i, 0] = 1
-        
+    
         # handle eos 
-        ens_ops[~alive & ops.eq(EOS_ID), i, EOS_ID] = 1
-        ens_toks[~alive & ops.eq(EOS_ID), i, PAD_TOKEN_ID] = 1
-        ens_idxs[~alive & ops.eq(EOS_ID), i, 0] = 1
+        ens_ops[alive & ops.eq(EOS_ID), i, EOS_ID] = 1
+        ens_toks[alive & ops.eq(EOS_ID), i, PAD_TOKEN_ID] = 1
+        ens_idxs[alive & ops.eq(EOS_ID), i, 0] = 1
         
         # update the living
         alive &= ~ops.eq(EOS_ID)
         ens_ops[torch.arange(B*M, device=device)[alive], i, ops[alive]] = 1
         ens_toks[torch.arange(B*M, device=device)[alive], i, toks[alive]] = 1
         ens_idxs[torch.arange(B*M, device=device)[alive], i, idxs[alive]] = 1
-       
+    
         # update log probs 
         log_probs += op_probs[torch.arange(B*M), ops]
         log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
         log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
         
+        if i % resample_at == 0:
+            weights = log_probs.view(B, M) - torch.logsumexp(log_probs.view(B, M), dim=-1, keepdim=True)
+            samples, _ = maybe_resample(weights, threshold, M)
+            
+            ens_ops, ens_toks, ens_idxs = tuple(map(
+                lambda x: x.view(B, M, N, -1)[torch.arange(B, device=device).unsqueeze(1), samples].view(B*M, N, -1),
+                (ens_ops, ens_toks, ens_idxs)
+            ))
+            
+            log_probs = log_probs.view(B, M)[torch.arange(B, device=device).unsqueeze(1), samples].view(B*M)
+        
     return (
-        (
-            ens_ops.view(B, M, N, -1),
-            ens_toks.view(B, M, N, -1),
-            ens_idxs.view(B, M, N, -1)
-        ),
+       (ens_ops.view(B, M, N, -1),
+        ens_toks.view(B, M, N, -1),
+        ens_idxs.view(B, M, N, -1)),
         log_probs.view(B, M)
     )
 

@@ -132,18 +132,17 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             desc='Computing alignments'
         ):
             path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
-            if os.path.exists(path):
-                logger.info('hit cache')
-                continue
+            if os.path.exists(path): continue
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
+            print(data[0].shape)
             with open(path, 'wb') as f: pickle.dump(data, f)
         
     def __getitem__(self, idx):
         with open(f'{self.cache_path}/{self.cache_prefix}_{idx}.zst', 'rb') as f:
             op_tgts, tok_tgts, idx_tgts = pickle.load(f)
             
-            tok_tgts = F.one_hot(tok_tgts, VOCAB_SIZE) if self.all_tokens else \
+            tok_tgts = F.one_hot(tok_tgts, VOCAB_SIZE) if not self.all_tokens else \
                        F.one_hot(self.traj_input_ids[idx], VOCAB_SIZE)[1:]
             
             return self.traj_input_ids[idx], (

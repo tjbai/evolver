@@ -38,7 +38,7 @@ def xent(logprobs, tgts, ignore=-1):
     keep_mask = torch.argmax(tgts, dim=-1) != ignore
     loss = loss * keep_mask
     tot = torch.sum(loss)
-    n = max(torch.sum(keep_mask), 1)
+    n = torch.sum(keep_mask)
     return -tot, n
 
 class CosineEmbedding(nn.Module):
@@ -289,8 +289,8 @@ class Evolver(nn.Module):
         return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
     
     def loss(self, edit_probs, edit_tgts):
-        op_tgts, tok_tgts, idx_tgts = tuple(map(lambda x: x[:, 1:, :], edit_tgts))
-        op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1, :], edit_probs))
+        op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1], edit_probs))
+        op_tgts, tok_tgts, idx_tgts = tuple(map(lambda x: x[:, 1:], edit_tgts))
         
         op_tot, op_n = xent(op_probs, op_tgts, ignore=PAD_ID)
         tok_tot, tok_n = xent(tok_probs, tok_tgts, ignore=PAD_TOKEN_ID)
@@ -308,19 +308,23 @@ class Evolver(nn.Module):
         T = traj_input_ids.shape[1]
         
         for i in range(T-1):
-            input_ids = traj_input_ids[:, i, :]
-            src_pad_mask = traj_pad_mask[:, i, :]
-            tgt_pad_mask = traj_pad_mask[:, i+1, :]
+            input_ids = traj_input_ids[:, i]
+            src_pad_mask = traj_pad_mask[:, i]
+            tgt_pad_mask = traj_pad_mask[:, i+1]
             edit_tgts = tuple(map(lambda x: x[:, i], traj_edit_tgts))
             
             edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
             op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
             
-            traj_loss += (op_tot / op_n) + (tok_tot / tok_n) + (idx_tot / idx_n)
+            traj_loss = 0 if op_n == 0 else op_tot / op_n
+            traj_loss += 0 if tok_n == 0 else tok_tot / tok_n
+            traj_loss += 0 if idx_n == 0 else idx_tot / idx_n
             
             traj_op_tot += op_tot; traj_op_n += op_n
             traj_tok_tot += tok_tot; traj_tok_n += tok_n
             traj_idx_tot += idx_tot; traj_idx_n += idx_n
+            
+            print('local', op_n, tok_n, idx_n)
       
         log({
             'train/per_occ_op_loss': traj_op_tot / traj_op_n,
@@ -330,6 +334,8 @@ class Evolver(nn.Module):
      
         # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
+        print('breakdown', traj_op_n, traj_tok_n, traj_idx_n)
+        print('total', N)
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
     
 class Transformer(nn.Module):

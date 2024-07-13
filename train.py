@@ -16,7 +16,6 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import BertTokenizer
 from tqdm import tqdm
 
-from constants import PAD_TOKEN_ID
 from model import Evolver, Transformer
 from run import sample_trajectory
 from data import (
@@ -32,6 +31,8 @@ from data import (
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
    
 def log_edits(traj_edit_tgts):
     logger.info(
@@ -120,7 +121,7 @@ def train_evolver(
         }, step=step)
         
         if (step + 1) % checkpoint_at == 0:
-            save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
+            save_path = f'{REMOTE_PREFIX}/checkpoints' if device == 'cuda' else 'checkpoints'
             torch.save({
                 'step': step,
                 'model': evolver.state_dict(),
@@ -185,7 +186,7 @@ def train_ar(
         log({'train/total_loss': loss.item()}, step=step)
         
         if (step + 1) % checkpoint_at == 0:
-            save_path = f'/scratch4/jeisner1/checkpoints' if device == 'cuda' else 'checkpoints'
+            save_path = f'{REMOTE_PREFIX}/checkpoints' if device == 'cuda' else 'checkpoints'
             torch.save({
                 'step': step,
                 'model': model.state_dict(),

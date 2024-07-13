@@ -9,16 +9,14 @@ import logging
 
 import torch
 import torch.nn.functional as F
-import zstandard as zstd
 
 from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
 from torch.utils.data import Dataset, Sampler
 
-from dep import noise
 from constants import (
-    PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID, VOCAB_SIZE,
+    PAD_TOKEN_ID, BOS_TOKEN_ID, VOCAB_SIZE,
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID,
     OP_VERB,
 )
@@ -26,6 +24,8 @@ from constants import (
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
     
 def pad_traj_input_ids(traj_input_ids, T):
     t, N = traj_input_ids.shape
@@ -124,7 +124,7 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
         )
         
         self.cache_prefix = cache_prefix
-        self.cache_path = f'/scratch4/jeisner1/cache/' if torch.cuda.is_available() else 'cache'
+        self.cache_path = f'{REMOTE_PREFIX}/cache/' if torch.cuda.is_available() else 'cache'
         os.makedirs(self.cache_path, exist_ok=True)
         
         for i, traj in tqdm(
@@ -135,7 +135,6 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
             if os.path.exists(path): continue
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
-            print(data[0].shape)
             with open(path, 'wb') as f: pickle.dump(data, f)
         
     def __getitem__(self, idx):
@@ -217,16 +216,13 @@ class StratifiedInfiniteSampler(Sampler):
     
 ### logging utilities
 
-def to_str(op, tok, idx, prev_toks=None, tokenizer=None):
+def to_str(op, tok, idx, verbose=True):
     op = OP_VERB[op]
     if op == 'PAD' or op == 'EOS': return op
-    idx_str = idx if prev_toks is None else prev_toks[idx-1]
-    tok_str = tok if tokenizer is None else ''.join(tokenizer.decode(tok).split())
-    return f'{op}({tok_str}, {idx_str})'
-    
-    if tok and idx: return f'SUB({tok_str}, {idx_str})'
-    elif tok: return f'INS({tok_str})'
-    elif idx: return f'CPY({idx_str})'
+    if verbose: return f'{op}({tok}, {idx})'
+    if tok and idx: return f'SUB({tok}, {idx})'
+    elif tok: return f'INS({tok})'
+    elif idx: return f'CPY({idx})'
     return 'UNK'    
 
 def elaborate(traj_edit_tgts, batch_first=True):
@@ -253,7 +249,7 @@ def generate_edits(s1, s2, tokenizer, aligner):
     s2_ids = tokenizer.encode(s2.lower())[1:-1]
   
     # always start with BOS
-    yield INS_ID, BOS_TOKEN_ID, None
+    yield INS_ID, BOS_TOKEN_ID, 0
     
     last = -1 
     for src, tgt in generate_alignment(s1, s2, aligner):
@@ -261,10 +257,10 @@ def generate_edits(s1, s2, tokenizer, aligner):
         # insert everything since last seen
         if last is not None and (tgt-last > 1):
             for missing in range(last+1, tgt):
-                yield INS_ID, s2_ids[missing], None
+                yield INS_ID, s2_ids[missing], 0
         
         # if aligned and equal, CPY 
-        if s1_ids[src] == s2_ids[tgt]: yield CPY_ID, None, src+1
+        if s1_ids[src] == s2_ids[tgt]: yield CPY_ID, PAD_TOKEN_ID, src+1
         
         # if aligned but not equal, SUB
         if s1_ids[src] != s2_ids[tgt]: yield SUB_ID, s2_ids[tgt], src+1
@@ -274,17 +270,12 @@ def generate_edits(s1, s2, tokenizer, aligner):
     # insert remaining values 
     if last is not None and (len(s2_ids)-last > 1):
         for missing in range(last+1, len(s2_ids)):
-            yield INS_ID, s2_ids[missing], None
+            yield INS_ID, s2_ids[missing], 0
          
     # always end with EOS 
-    yield EOS_ID, None, None
+    yield EOS_ID, PAD_TOKEN_ID, 0
     
 def get_edit_tgts(edit_seq, max_len):
-    
-    edit_seq = [
-        (op, PAD_TOKEN_ID if tok is None else tok, 0 if idx is None else idx)
-        for (op, tok, idx) in edit_seq
-    ]
     op_tgts, tok_tgts, idx_tgts = map(lambda x: list(x), (zip(*edit_seq)))
   
     # pad and/or truncate
@@ -292,29 +283,19 @@ def get_edit_tgts(edit_seq, max_len):
         op_tgts.extend([PAD_ID for _ in range(max_len-n)])
         tok_tgts.extend([PAD_TOKEN_ID for _ in range(max_len-n)])
         idx_tgts.extend([0 for _ in range(max_len-n)])
-        
-    # return (
-    #     F.one_hot(torch.tensor(op_tgts[:max_len]), 5),
-    #     F.one_hot(torch.tensor(tok_tgts[:max_len]), VOCAB_SIZE),
-    #     F.one_hot(torch.tensor(idx_tgts[:max_len]), max_len)
-    # )
     
     return op_tgts[:max_len], tok_tgts[:max_len], idx_tgts[:max_len]
     
 def get_traj_edit_tgts(trajectory, max_len, tokenizer, aligner):
-    traj_edit_tgts = ([], [], [])
-    traj_op_tgts, traj_tok_tgts, traj_idx_tgts = traj_edit_tgts
-
     t1 = iter(trajectory)
     t2 = iter(trajectory)
     next(t2)
     
+    traj_edit_tgts = ([], [], [])
     for s1, s2 in zip(t1, t2):
         edit_seq = generate_edits(s1, s2, tokenizer, aligner)
-        op_tgts, tok_tgts, idx_tgts = get_edit_tgts(edit_seq, max_len)
-        traj_op_tgts.append(op_tgts)
-        traj_tok_tgts.append(tok_tgts)
-        traj_idx_tgts.append(idx_tgts)
+        edit_tgts = get_edit_tgts(edit_seq, max_len)
+        for i in range(3): traj_edit_tgts[i].append(edit_tgts[i])
         
     return tuple(map(torch.tensor, traj_edit_tgts))
 

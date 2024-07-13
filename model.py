@@ -204,7 +204,7 @@ class Evolver(nn.Module):
         if len(input_ids.shape) == 1:
             input_ids = input_ids.unsqueeze(0).expand(B, -1)
         
-        tgt = torch.zeros(B, cur_len, self.d_model).to(self.device)
+        tgt = torch.zeros(B, cur_len, self.d_model, device=self.device)
        
         # subtract old positional encodings 
         memory = self.positional_encoding(memory, dir=-1)
@@ -216,7 +216,7 @@ class Evolver(nn.Module):
         # INS: add new embeddings
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
-            ins_embeds = self.embedding(tok_ids[ins_mask])
+            ins_embeds = self.embedding(tok_ids[ins_mask]) * np.sqrt(self.d_model)
             tgt[ins_mask] = ins_embeds
             
         # CPY: copy over old embeddings
@@ -228,13 +228,13 @@ class Evolver(nn.Module):
         # SUB: subtract old embeddings and add new embeddings
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
-            old_embeds = self.embedding(permuted_input_ids[sub_mask])
-            new_embeds = self.embedding(tok_ids[sub_mask])
+            old_embeds = self.embedding(permuted_input_ids[sub_mask]) * np.sqrt(self.d_model)
+            new_embeds = self.embedding(tok_ids[sub_mask]) * np.sqrt(self.d_model)
             tgt[sub_mask] = permuted_memory[sub_mask] - old_embeds + new_embeds
         
         # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
-        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id, device=self.device))
+        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id, device=self.device)) * np.sqrt(self.d_model)
         
         # add new positional encodings 
         tgt = self.positional_encoding(tgt, dir=1)
@@ -323,8 +323,6 @@ class Evolver(nn.Module):
             traj_op_tot += op_tot; traj_op_n += op_n
             traj_tok_tot += tok_tot; traj_tok_n += tok_n
             traj_idx_tot += idx_tot; traj_idx_n += idx_n
-            
-            print('local', op_n, tok_n, idx_n)
       
         log({
             'train/per_occ_op_loss': traj_op_tot / traj_op_n,
@@ -334,8 +332,6 @@ class Evolver(nn.Module):
      
         # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
-        print('breakdown', traj_op_n, traj_tok_n, traj_idx_n)
-        print('total', N)
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
     
 class Transformer(nn.Module):

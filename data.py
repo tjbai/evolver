@@ -38,10 +38,9 @@ def pad_traj_input_ids(traj_input_ids, T):
     return torch.cat([traj_input_ids, pad_seq])
 
 def pad_traj_edit_tgts(traj_edit_tgts, T):
-    
     if len(traj_edit_tgts[0].shape) == 2:
         traj_edit_tgts = tuple(map(lambda x: x.unsqueeze(0), traj_edit_tgts))
-        
+
     t, N, _ = traj_edit_tgts[0].shape
     device = traj_edit_tgts[0].device
     

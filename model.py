@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer as T
 
-from data import elaborate
 from constants import (
     VOCAB_SIZE,
     PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID,

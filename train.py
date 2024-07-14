@@ -278,6 +278,9 @@ def init_run(prefix, name, device, local, config):
             dim_feedforward=config['dim_feedforward'],
             encoder_layers=config['encoder_layers'],
             decoder_layers=config['decoder_layers'],
+            op_scale=config['op_scale'],
+            tok_scale=config['tok_scale'],
+            idx_scale=config['idx_scale'],
             device=device
         ).to(device)
     
@@ -327,14 +330,13 @@ def init_run(prefix, name, device, local, config):
 def main():
     args = parse_args()
     logger.setLevel(getattr(logging, args.log_level))
-    
     with open(args.config, 'r') as f: config = json.load(f)
+    
     prefix = parse_model_id(args.config)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f'{prefix}_{timestamp}'
     
-    model, optim, lr_scheduler, start_step = \
-        init_run(prefix, name, args.device, args.local, config)
+    model, optim, lr_scheduler, start_step = init_run(prefix, name, args.device, args.local, config)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
        
     # autoregressive seq2seq 

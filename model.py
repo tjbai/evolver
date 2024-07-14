@@ -154,7 +154,7 @@ class Evolver(nn.Module):
         dropout=0.1, dim_feedforward=2048,
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
-        pos_embedding='cosine', # TODO -- rope
+        op_scale=1, tok_scale=1, idx_scale=1,
         device='cpu'
     ):
         super().__init__()
@@ -303,7 +303,7 @@ class Evolver(nn.Module):
         traj_src, traj_pad_mask = self.get_src(traj_input_ids)
         src = traj_src[:, 0, :]
         
-        traj_loss = 0
+        # traj_loss = 0
         T = traj_input_ids.shape[1]
         
         for i in range(T-1):
@@ -315,9 +315,9 @@ class Evolver(nn.Module):
             edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
             op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
             
-            traj_loss = 0 if op_n == 0 else op_tot / op_n
-            traj_loss += 0 if tok_n == 0 else tok_tot / tok_n
-            traj_loss += 0 if idx_n == 0 else idx_tot / idx_n
+            # traj_loss = 0 if op_n == 0 else op_tot / op_n
+            # traj_loss += 0 if tok_n == 0 else tok_tot / tok_n
+            # traj_loss += 0 if idx_n == 0 else idx_tot / idx_n
             
             traj_op_tot += op_tot; traj_op_n += op_n
             traj_tok_tot += tok_tot; traj_tok_n += tok_n
@@ -328,6 +328,14 @@ class Evolver(nn.Module):
             'train/per_occ_tok_loss': traj_tok_tot / traj_tok_n,
             'train/per_occ_idx_loss': traj_idx_tot / traj_idx_n,
         }, step=step)
+        
+        # NOTE -- 7/14 change, traj loss should be the sum of per_occ_losses
+        # this means longer trajectories/sequences contribute more to the loss
+        # we also add in scaling
+        traj_loss = \
+            (traj_op_tot / traj_op_n) * self.op_scale \
+          + (traj_tok_tot / traj_tok_n) * self.tok_scale \
+          + (traj_idx_tot / traj_idx_n) * self.idx_scale
      
         # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
@@ -341,7 +349,7 @@ class Transformer(nn.Module):
         encoder_layers=6, decoder_layers=6,
         dropout=0.1, dim_feedforward=2048,
         vocab_size=VOCAB_SIZE, # NOTE -- dangerous
-        device='cpu'
+        device='cpu', **_
     ):
         super().__init__()
         

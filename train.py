@@ -109,15 +109,13 @@ def train_evolver(
             
         traj_loss.backward()
         record_grad_norms(evolver, step)
-        if clip_gradients:
-            clip_grad_norm_(evolver.parameters(), 1)
+        if clip_gradients: clip_grad_norm_(evolver.parameters(), 1)
         
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
             
-        if lr_scheduler:
-            lr_scheduler.step()
+        if lr_scheduler: lr_scheduler.step()
         
         log({
             'train/total_loss': op_loss + tok_loss + idx_loss,

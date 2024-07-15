@@ -40,11 +40,10 @@ def xent(logprobs, tgts, ignore=-1):
     n = torch.sum(keep_mask)
     return -tot, n
 
-class CosineEmbedding(nn.Module):
+class SinusoidalEmbedding(nn.Module):
     
-    def __init__(self, d_model=512, dropout=0.1, max_len=10):
+    def __init__(self, d_model=512, max_len=10):
         super().__init__()
-        self.dropout = nn.Dropout(p=dropout) 
         pos = torch.arange(max_len).unsqueeze(1)
         div = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10_000) / d_model))
         pe = torch.zeros(1, max_len, d_model)
@@ -52,9 +51,30 @@ class CosineEmbedding(nn.Module):
         pe[0, :, 1::2] = torch.cos(pos * div)
         self.register_buffer('pe', pe)
     
-    def forward(self, x, dir):
-        x = x + dir * self.pe[:, :x.shape[-2], :]
-        return self.dropout(x) if dir > 0 else x
+    def forward(self, x, d):
+        return x + d * self.pe[:, :x.shape[-2], :]
+    
+class LearnedSpatialEmbedding(nn.Module):
+    
+    def __init__(self, d_model=512, max_len=10):
+        super().__init__()
+        self.embedding = nn.Embedding(max_len, d_model)
+        
+        # NOTE -- just initialize to sinusoidal for now
+        pos = torch.arange(max_len).unsqueeze(1)
+        div = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10_000) / d_model))
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+       
+        self.embedding.weight.data.copy_(pe)
+        self.embedding.requires_grad_ = False
+        
+    def forward(self, x, d, pos=None):
+        if pos is None:
+            B, N, _ = x.shape
+            pos = torch.arange(N, device=x.device).unsqueeze(0).expand(B, -1)
+        return x + d * self.embedding(pos)
     
 class RotaryEmbedding(nn.Module):
     
@@ -155,6 +175,7 @@ class Evolver(nn.Module):
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
         op_scale=1, tok_scale=1, idx_scale=1,
+        embeddings='sinu',
         device='cpu'
     ):
         super().__init__()
@@ -166,7 +187,11 @@ class Evolver(nn.Module):
         self.vocab_size = vocab_size
       
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.positional_encoding = CosineEmbedding(d_model=d_model, max_len=max_len)
+        self.positional_embedding = \
+            (SinusoidalEmbedding if embeddings == 'sinu' else LearnedSpatialEmbedding)(
+                d_model=d_model,
+                max_len=max_len
+            )
         
         self.pad_token_id = PAD_TOKEN_ID
         self.bos_token_id = BOS_TOKEN_ID # use [CLS] as BOS
@@ -209,38 +234,35 @@ class Evolver(nn.Module):
         
         tgt = torch.zeros(B, cur_len, self.d_model, device=self.device)
        
-        # subtract old positional encodings 
-        memory = self.positional_encoding(memory, dir=-1)
+        # subtract old spatial embeddings 
+        memory = self.positional_embedding(memory, d=-1)
         
         # permuted[i, j, :] = prev[i, idx_ids[i, j], :]
         permuted_memory = memory[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
         permuted_input_ids = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
         
-        # INS: add new embeddings
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
             ins_embeds = self.embedding(tok_ids[ins_mask]) * np.sqrt(self.d_model)
             tgt[ins_mask] = ins_embeds
             
-        # CPY: copy over old embeddings
         cpy_mask = op_ids.eq(CPY_ID)
         if torch.any(cpy_mask):
             cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
             tgt[cpy_mask] = permuted_memory[cpy_mask]
         
-        # SUB: subtract old embeddings and add new embeddings
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
             old_embeds = self.embedding(permuted_input_ids[sub_mask]) * np.sqrt(self.d_model)
             new_embeds = self.embedding(tok_ids[sub_mask]) * np.sqrt(self.d_model)
             tgt[sub_mask] = permuted_memory[sub_mask] - old_embeds + new_embeds
         
-        # EOS: broadcast EOS embedding
         eos_mask = op_ids.eq(EOS_ID)
-        tgt[eos_mask] = self.embedding(torch.tensor(self.eos_token_id, device=self.device)) * np.sqrt(self.d_model)
+        if torch.any(eos_mask):
+            tgt[eos_mask] = self.embedding.weight[self.eos_token_id] * np.sqrt(self.d_model)
         
-        # add new positional encodings 
-        tgt = self.positional_encoding(tgt, dir=1)
+        # add new spatial embeddings
+        tgt = self.positional_embedding(tgt, d=1)
         
         return tgt
     
@@ -307,7 +329,6 @@ class Evolver(nn.Module):
         traj_src, traj_pad_mask = self.get_src(traj_input_ids)
         src = traj_src[:, 0, :]
         
-        # traj_loss = 0
         T = traj_input_ids.shape[1]
         
         for i in range(T-1):
@@ -319,10 +340,6 @@ class Evolver(nn.Module):
             edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
             op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
             
-            # traj_loss = 0 if op_n == 0 else op_tot / op_n
-            # traj_loss += 0 if tok_n == 0 else tok_tot / tok_n
-            # traj_loss += 0 if idx_n == 0 else idx_tot / idx_n
-            
             traj_op_tot += op_tot; traj_op_n += op_n
             traj_tok_tot += tok_tot; traj_tok_n += tok_n
             traj_idx_tot += idx_tot; traj_idx_n += idx_n
@@ -333,14 +350,12 @@ class Evolver(nn.Module):
             'train/per_occ_idx_loss': traj_idx_tot / traj_idx_n,
         }, step=step)
         
-        # NOTE -- 7/14 change, traj loss should be the sum of per_occ_losses
-        # this means longer trajectories/sequences contribute more to the loss
-        # we also add in scaling
-        traj_loss = \
-            (traj_op_tot / traj_op_n) * self.op_scale \
-          + (traj_tok_tot / traj_tok_n) * self.tok_scale \
-          + (traj_idx_tot / traj_idx_n) * self.idx_scale
-     
+        traj_loss = (
+            (traj_op_tot  / traj_op_n  * self.op_scale) +
+            (traj_tok_tot / traj_tok_n * self.tok_scale) +
+            (traj_idx_tot / traj_idx_n * self.idx_scale)
+        )
+    
         # backpropagate per-occurrence but report per-token
         N = torch.sum(~traj_pad_mask[:, 1:, :])
         return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
@@ -369,7 +384,7 @@ class Transformer(nn.Module):
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.embedding.weight # weight tying
         
-        self.positional_encoding = CosineEmbedding(d_model=d_model, max_len=max_len)
+        self.positional_encoding = SinusoidalEmbedding(d_model=d_model, max_len=max_len)
      
         # despite naming, the encoder layers are used for the decoder-only baseline
         # this is my fault for using the pytorch transformer in the first place

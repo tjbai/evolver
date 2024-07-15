@@ -1,7 +1,7 @@
 {
     "train": "data/imdb/imdb_train_1.jsonl",
     "eval": "data/imdb/imdb_dev_1.jsonl",
-    "notes": "try with a different composition of the loss function and get rid of clipping",
+    "notes": "more aggressive index scaling",
 
     "d_model": 512,
     "nhead": 8,
@@ -22,7 +22,7 @@
     "eval_at": 400,
 
     "all_tokens": true,
-    "op_scale": 1,
+    "op_scale": 10,
     "tok_scale": 1,
-    "idx_scale": 1
+    "idx_scale": 10
 }

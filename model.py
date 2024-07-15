@@ -171,6 +171,10 @@ class Evolver(nn.Module):
         self.pad_token_id = PAD_TOKEN_ID
         self.bos_token_id = BOS_TOKEN_ID # use [CLS] as BOS
         self.eos_token_id = EOS_TOKEN_ID # use [SEP] as EOS
+
+        self.op_scale = op_scale
+        self.tok_scale = tok_scale
+        self.idx_scale = idx_scale
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,

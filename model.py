@@ -269,7 +269,7 @@ class Evolver(nn.Module):
     def get_src(self, x):
         pad_mask = x.eq(self.pad_token_id)
         x = self.embedding(x) * np.sqrt(self.d_model)
-        x = self.positional_encoding(x, dir=1)
+        x = self.positional_embedding(x, d=1)
         return x, pad_mask
   
     def forward(
@@ -384,7 +384,7 @@ class Transformer(nn.Module):
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.embedding.weight # weight tying
         
-        self.positional_encoding = SinusoidalEmbedding(d_model=d_model, max_len=max_len)
+        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len)
      
         # despite naming, the encoder layers are used for the decoder-only baseline
         # this is my fault for using the pytorch transformer in the first place
@@ -414,7 +414,7 @@ class Transformer(nn.Module):
     def get_src(self, x):
         pad_mask = x.eq(self.pad_token_id)
         x = self.embedding(x) * np.sqrt(self.d_model)
-        x = self.positional_encoding(x, dir=1)
+        x = self.positional_embedding(x, dir=1)
         return x, pad_mask
     
     def forward(

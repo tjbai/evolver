@@ -17,7 +17,7 @@ from dep import noise
 from constants import (
     BOS_TOKEN_ID, PAD_TOKEN_ID, EOS_TOKEN_ID,
     PAD_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID,
-    INS_BOS, VOCAB_SIZE
+    VOCAB_SIZE
 )
 
 logging.basicConfig()
@@ -40,6 +40,8 @@ def sample_trajectory(
     traj_idx_tgts = torch.zeros(B, T-1, N, N, device=device)
 
     for i in range(T-1):
+        # print(f'\n### new trajectory step {i}')
+        
         edit_tgts, src, log_prob = particle_filter(
             evolver, traj_input_ids[:, i], traj_input_ids[:, i+1],
             src, traj_pad_mask[:, i, :], traj_pad_mask[:, i+1, :],
@@ -120,8 +122,15 @@ def particle_filter(
     op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids) # BxNx(2N+1) each
    
     memory = cache = None 
-    for i in range(1, N):
+    for i in range(1, N): 
         forced = output_ids[:, i]
+       
+        # update pad first so we can early exit 
+        pad = forced.eq(PAD_TOKEN_ID)
+        ens_ops[:, :, i, PAD_ID] = 1
+        ens_toks[pad, :, i, PAD_TOKEN_ID] = 1
+        ens_idxs[pad, :, i, 0] = 1
+        if torch.all(pad): break
      
         # BxMxIx_ -> BMxIx_
         ens = tuple(map(
@@ -164,30 +173,26 @@ def particle_filter(
         sample_weight = posterior_probs - proposal_probs
         
         # C[i, j] = one_hot(B[i, A[i, j]]])
+        # can we make this update faster?
         fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
        
-        # TODO -- implement a fast(er) update 
         update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))
         ens_ops[update, :, i, :] = fn(samples, op_ids[:, i, :], 5)[update]
         ens_toks[update, :, i, :] = fn(samples, tok_ids[:, i, :], VOCAB_SIZE)[update]
         ens_idxs[update, :, i, :] = fn(samples, idx_ids[:, i, :], N)[update]
         weights[update] += sample_weight[update]
        
-        # if torch.sum(update) > 0:
-        #     print('INS PROB', op_probs[:, :, -1, INS_ID], 'CPY PROB', op_probs[:, :, -1, CPY_ID])
-        #     print('PROB OF THIS TOKEN', tok_probs[torch.arange(B), :, -1, forced])
-        #     print('WEIGHT DIFF', posterior_probs[update], proposal_probs[update], sample_weight[update])
-        
         eos = forced.eq(EOS_TOKEN_ID)
         ens_ops[eos, :, i, EOS_ID] = 1
         ens_toks[eos, :, i, PAD_TOKEN_ID] = 1
         ens_idxs[eos, :, i, 0] = 1
         weights[eos] += op_probs[eos, :, -1, EOS_ID]
         
-        pad = forced.eq(PAD_TOKEN_ID)
-        ens_ops[pad, :, i, PAD_ID] = 1
-        ens_toks[pad, :, i, PAD_TOKEN_ID] = 1
-        ens_idxs[pad, :, i, 0] = 1
+        # if torch.any(update):
+        #     print('STEP', i, 'SAMPLED', samples.item())
+        #     print('INS PROB', op_probs[:, :, -1, INS_ID].item(), 'CPY PROB', op_probs[:, :, -1, CPY_ID].item())
+        #     print('TOKEN PROB', tok_probs[torch.arange(B), :, -1, forced].item())
+        #     print('WEIGHT DIFF', posterior_probs[update].item(), '-', proposal_probs[update].item(), '=', sample_weight[update].item())
         
         if M == 1: continue
         
@@ -401,7 +406,7 @@ def _particle_filter(
     
     # initialize particles and weights 
     weights = torch.zeros(M).to(device)
-    _ens = get_edit_tgts([INS_BOS], evolver.max_len)
+    _ens = get_edit_tgts([None], evolver.max_len)
     ens = tuple(map(lambda x: x.unsqueeze(0).repeat(M, 1, 1).to(device), _ens))
     ens_ops, ens_toks, ens_idxs = ens
    

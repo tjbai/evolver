@@ -35,9 +35,7 @@ logger.setLevel(logging.INFO)
 if torch.cuda.is_available():
     device = torch.cuda.current_device()
     gpu_properties = torch.cuda.get_device_properties(device)
-    print(f"'RUNNING ON: {gpu_properties.name}")
-else:
-    print("No CUDA-capable GPU detected")
+    print(f'RUNNING ON: {gpu_properties.name}')
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
    

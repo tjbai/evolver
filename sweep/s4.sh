@@ -7,4 +7,4 @@
 
 ml conda
 conda activate evo
-wandb agent zada54jy
+wandb agent tjbai/evolver/zada54jy

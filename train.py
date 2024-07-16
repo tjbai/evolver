@@ -7,7 +7,6 @@ from datetime import datetime
 
 import wandb
 import torch
-import torch.nn.functional as F
 
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR

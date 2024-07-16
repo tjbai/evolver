@@ -10,18 +10,15 @@ job_name=$(basename "$config_path" .json)
 
 cat << EOF > "slurm/${job_name}.sh"
 #!/bin/bash
-#SBATCH --partition=a100
-#SBATCH -A jeisner1_gpu
-#SBATCH --gres=gpu:1
+#SBATCH --job-name=${job_name}
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --time=8:00:0
-#SBATCH --job-name=$job_name
+#SBATCH --gpus=1
+#SBATCH --partition=gpu
 #SBATCH --output=$job_name.out
-#SBATCH --mem=80G
 
-ml anaconda
+ml conda
 conda activate evo
+export REMOTE_PREFIX="/export/b12/tbai4"
 python3 train.py --config $config_path --device cuda
 EOF
 

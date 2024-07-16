@@ -7,4 +7,8 @@
 
 ml conda
 conda activate evo
+<<<<<<< Updated upstream
+=======
+export REMOTE_PREFIX="/export/b12/tbai4"
+>>>>>>> Stashed changes
 wandb agent tjbai/evolver/zada54jy

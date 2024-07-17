@@ -280,9 +280,9 @@ def init_run(prefix, name, device, local, config):
             dim_feedforward=config['dim_feedforward'],
             encoder_layers=config['encoder_layers'],
             decoder_layers=config['decoder_layers'],
-            op_scale=config['op_scale'],
-            tok_scale=config['tok_scale'],
-            idx_scale=config['idx_scale'],
+            op_scale=config.get('op_scale', 1),
+            tok_scale=config.get('tok_scale', 1),
+            idx_scale=config.get('idx_scale', 1),
             device=device
         ).to(device)
     

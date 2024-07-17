@@ -76,6 +76,14 @@ class LearnedSpatialEmbedding(nn.Module):
             pos = torch.arange(N, device=x.device).unsqueeze(0).expand(B, -1)
         return x + d * self.embedding(pos)
     
+class IdentityEmbedding(nn.Module):
+    
+    def __init__(self, **kwargs):
+        super().__init__()
+        
+    def forward(self, x, **kwargs):
+        return x
+    
 class RotaryEmbedding(nn.Module):
     
     def __init__(self):
@@ -170,12 +178,13 @@ class Evolver(nn.Module):
     
     def __init__(
         self,
-        d_model=512, nhead=8, max_len=10,
+        d_model=512, nhead=8, max_len=10, max_depth=10,
         dropout=0.1, dim_feedforward=2048,
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
         op_scale=1, tok_scale=1, idx_scale=1,
         embeddings='sinu',
+        depth_embeddings=False,
         device='cpu'
     ):
         super().__init__()
@@ -187,10 +196,17 @@ class Evolver(nn.Module):
         self.vocab_size = vocab_size
       
         self.embedding = nn.Embedding(vocab_size, d_model)
+        
         self.positional_embedding = \
             (SinusoidalEmbedding if embeddings == 'sinu' else LearnedSpatialEmbedding)(
                 d_model=d_model,
                 max_len=max_len
+            )
+            
+        self.depth_embedding = \
+            (LearnedSpatialEmbedding if depth_embeddings else IdentityEmbedding)(
+                d_model=d_model,
+                max_len=max_depth
             )
         
         self.pad_token_id = PAD_TOKEN_ID
@@ -225,7 +241,7 @@ class Evolver(nn.Module):
         self.tok_head.weight = self.embedding.weight # tie weights
         self.idx_head = nn.Linear(d_model, self.max_len)
     
-    def compute_tgt(self, input_ids, memory, edit_tgts):
+    def compute_tgt(self, input_ids, memory, edit_tgts, depth):
         op_ids, tok_ids, idx_ids = tuple(map(lambda x: torch.argmax(x, dim=-1), edit_tgts))
         B, cur_len = op_ids.shape
         
@@ -236,6 +252,7 @@ class Evolver(nn.Module):
        
         # subtract old spatial embeddings 
         memory = self.positional_embedding(memory, d=-1)
+        memory = self.depth_embedding(memory, d=-1, pos=depth)
         
         # permuted[i, j, :] = prev[i, idx_ids[i, j], :]
         permuted_memory = memory[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
@@ -263,6 +280,7 @@ class Evolver(nn.Module):
         
         # add new spatial embeddings
         tgt = self.positional_embedding(tgt, d=1)
+        tgt = self.depth_embedding(tgt, )
         
         return tgt
     
@@ -414,7 +432,7 @@ class Transformer(nn.Module):
     def get_src(self, x):
         pad_mask = x.eq(self.pad_token_id)
         x = self.embedding(x) * np.sqrt(self.d_model)
-        x = self.positional_embedding(x, dir=1)
+        x = self.positional_embedding(x, d=1)
         return x, pad_mask
     
     def forward(

@@ -178,13 +178,12 @@ class Evolver(nn.Module):
     
     def __init__(
         self,
-        d_model=512, nhead=8, max_len=10, max_depth=10,
+        d_model=512, nhead=8, max_len=10,
         dropout=0.1, dim_feedforward=2048,
         encoder_layers=6, decoder_layers=6,
         vocab_size=VOCAB_SIZE,
         op_scale=1, tok_scale=1, idx_scale=1,
-        embeddings='sinu',
-        depth_embeddings=False,
+        pos_embeddings='sinu',
         device='cpu'
     ):
         super().__init__()
@@ -198,16 +197,16 @@ class Evolver(nn.Module):
         self.embedding = nn.Embedding(vocab_size, d_model)
         
         self.positional_embedding = \
-            (SinusoidalEmbedding if embeddings == 'sinu' else LearnedSpatialEmbedding)(
+            (SinusoidalEmbedding if pos_embeddings == 'sinu' else LearnedSpatialEmbedding)(
                 d_model=d_model,
                 max_len=max_len
             )
             
-        self.depth_embedding = \
-            (LearnedSpatialEmbedding if depth_embeddings else IdentityEmbedding)(
-                d_model=d_model,
-                max_len=max_depth
-            )
+        # self.depth_embedding = \
+        #     (LearnedSpatialEmbedding if depth_embeddings else IdentityEmbedding)(
+        #         d_model=d_model,
+        #         max_len=max_depth
+        #     )
         
         self.pad_token_id = PAD_TOKEN_ID
         self.bos_token_id = BOS_TOKEN_ID # use [CLS] as BOS
@@ -241,7 +240,7 @@ class Evolver(nn.Module):
         self.tok_head.weight = self.embedding.weight # tie weights
         self.idx_head = nn.Linear(d_model, self.max_len)
     
-    def compute_tgt(self, input_ids, memory, edit_tgts, depth):
+    def compute_tgt(self, input_ids, edit_tgts, memory):
         op_ids, tok_ids, idx_ids = tuple(map(lambda x: torch.argmax(x, dim=-1), edit_tgts))
         B, cur_len = op_ids.shape
         
@@ -249,14 +248,13 @@ class Evolver(nn.Module):
             input_ids = input_ids.unsqueeze(0).expand(B, -1)
         
         tgt = torch.zeros(B, cur_len, self.d_model, device=self.device)
-       
-        # subtract old spatial embeddings 
+            
         memory = self.positional_embedding(memory, d=-1)
-        memory = self.depth_embedding(memory, d=-1, pos=depth)
+        # memory = self.depth_embedding(memory, d=-1, pos=depth)
         
-        # permuted[i, j, :] = prev[i, idx_ids[i, j], :]
         permuted_memory = memory[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
         permuted_input_ids = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
+        # depth = depth[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
         
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
@@ -267,6 +265,9 @@ class Evolver(nn.Module):
         if torch.any(cpy_mask):
             cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
             tgt[cpy_mask] = permuted_memory[cpy_mask]
+            # "promote" copied tokens and reset others 
+            # depth[cpy_mask] += 1
+            # depth[~cpy_mask] = 0
         
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
@@ -278,9 +279,8 @@ class Evolver(nn.Module):
         if torch.any(eos_mask):
             tgt[eos_mask] = self.embedding.weight[self.eos_token_id] * np.sqrt(self.d_model)
         
-        # add new spatial embeddings
         tgt = self.positional_embedding(tgt, d=1)
-        tgt = self.depth_embedding(tgt, )
+        # tgt = self.depth_embedding(tgt, d=1, pos=depth)
         
         return tgt
     
@@ -289,94 +289,73 @@ class Evolver(nn.Module):
         x = self.embedding(x) * np.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x, pad_mask
+   
+    def get_probs(self, edit_logits, pad_mask):
+        *_, idx_logits = edit_logits
+        idx_logits[pad_mask.unsqueeze(1).expand_as(idx_logits)] = -1e9
+        return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
   
     def forward(
-        self,
-        input_ids, src, edit_tgts,
-        src_pad_mask, tgt_pad_mask,
-        memory=None, cache=None
+        self, input_ids, edit_tgts,
+        src=None, memory=None, cache=None,
     ):
-        if self.training and memory is not None:
-            raise Exception('encoder memory found during training')
+        if self.training and memory is not None: raise Exception()
+        if self.training and cache is not None: raise Exception()
         
-        if self.training and cache is not None:
-            raise Exception('kv cache found during training')
+        src_0, pad_mask = self.get_src(input_ids)
+        src = src_0 if src is None else src
         
-        if memory is None:
-            memory = self.encoder(src, src_key_padding_mask=src_pad_mask)
-            
-        tgt = self.compute_tgt(input_ids, memory, edit_tgts)
-        cur_len = tgt.shape[1]
-        tgt_pad_mask = None if tgt_pad_mask is None else tgt_pad_mask[:, :cur_len]
+        memory = self.encoder(src, src_key_padding_mask=pad_mask) if memory is None else memory
+        tgt = self.compute_tgt(input_ids, edit_tgts, memory)
       
-        output, new_cache = self.decoder(
+        output, cache = self.decoder(
             tgt, memory,
             cache=cache,
-            tgt_key_padding_mask=tgt_pad_mask,
-            memory_key_padding_mask=src_pad_mask,
+            memory_key_padding_mask=pad_mask,
         )
         
         op_logits = self.op_head(output)
         tok_logits = self.tok_head(output)
         idx_logits = self.idx_head(output)
         
-        return (
-            self.get_probs((op_logits, tok_logits, idx_logits), src_pad_mask),
-            tgt, memory, new_cache
-        )
-   
-    @staticmethod
-    def get_probs(edit_logits, pad_mask):
-        *_, idx_logits = edit_logits
-        idx_logits[pad_mask.unsqueeze(1).expand_as(idx_logits)] = -1e9
-        return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
+        probs = self.get_probs((op_logits, tok_logits, idx_logits), pad_mask)
+        return probs, tgt, memory, cache
     
     def loss(self, edit_probs, edit_tgts):
-        op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, :-1], edit_probs))
-        op_tgts, tok_tgts, idx_tgts = tuple(map(lambda x: x[:, 1:], edit_tgts))
-        
-        op_tot, op_n = xent(op_probs, op_tgts, ignore=PAD_ID)
-        tok_tot, tok_n = xent(tok_probs, tok_tgts, ignore=PAD_TOKEN_ID)
-        idx_tot, idx_n = xent(idx_probs, idx_tgts, ignore=0)
-        
-        return op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n
+        return sum((
+            xent(p[:, :-1], t[:, 1:], ignore=i)
+            for p, t, i in zip(edit_probs, edit_tgts, [PAD_ID, PAD_TOKEN_ID, 0]
+        )), ())
 
     def traj_loss(self, traj_input_ids, traj_edit_tgts, step=None):
-        traj_op_tot = traj_tok_tot = traj_idx_tot = 0
-        traj_op_n = traj_tok_n = traj_idx_n = 0
-        traj_src, traj_pad_mask = self.get_src(traj_input_ids)
-        src = traj_src[:, 0, :]
-        
-        T = traj_input_ids.shape[1]
-        
+        _, T, _ = traj_input_ids.shape
+        tot, n = [0, 0, 0], [0, 0, 0]
+       
+        src = None 
         for i in range(T-1):
             input_ids = traj_input_ids[:, i]
-            src_pad_mask = traj_pad_mask[:, i]
-            tgt_pad_mask = traj_pad_mask[:, i+1]
             edit_tgts = tuple(map(lambda x: x[:, i], traj_edit_tgts))
-            
-            edit_probs, src, *_ = self.forward(input_ids, src, edit_tgts, src_pad_mask, tgt_pad_mask)
-            op_tot, op_n, tok_tot, tok_n, idx_tot, idx_n = self.loss(edit_probs, edit_tgts)
-            
-            traj_op_tot += op_tot; traj_op_n += op_n
-            traj_tok_tot += tok_tot; traj_tok_n += tok_n
-            traj_idx_tot += idx_tot; traj_idx_n += idx_n
+            edit_probs, src, *_ = self.forward(input_ids, edit_tgts, src)
+          
+            loss = self.loss(edit_probs, edit_tgts)
+            for i in range(3):
+                tot[i] += loss[2*i]
+                n[i] += loss[2*i+1]
       
         log({
-            'train/per_occ_op_loss': traj_op_tot / traj_op_n,
-            'train/per_occ_tok_loss': traj_tok_tot / traj_tok_n,
-            'train/per_occ_idx_loss': traj_idx_tot / traj_idx_n,
+            'train/per_occ_op_loss': tot[0] / n[0],
+            'train/per_occ_tok_loss': tot[1] / n[1],
+            'train/per_occ_idx_loss': tot[2] / n[2],
         }, step=step)
         
         traj_loss = (
-            (traj_op_tot  / traj_op_n  * self.op_scale) +
-            (traj_tok_tot / traj_tok_n * self.tok_scale) +
-            (traj_idx_tot / traj_idx_n * self.idx_scale)
+            (tot[0] / n[0] * self.op_scale)  +
+            (tot[1] / n[1] * self.tok_scale) +
+            (tot[2] / n[2] * self.idx_scale)
         )
     
-        # backpropagate per-occurrence but report per-token
-        N = torch.sum(~traj_pad_mask[:, 1:, :])
-        return traj_loss, traj_op_tot / N, traj_tok_tot / N, traj_idx_tot / N
+        N = torch.sum(~(traj_input_ids.eq(PAD_TOKEN_ID)[:, 1:, :])) 
+        return traj_loss, tot[0] / N, tot[1] / N, tot[2] / N
     
 class Transformer(nn.Module):
     

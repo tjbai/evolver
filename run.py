@@ -140,9 +140,7 @@ def particle_filter(
         
         edit_probs, _, memory, cache = evolver.forward(
             batch_ids.view(B*M, N),
-            src.view(B*M, N, -1), ens,
-            src_pad_mask.view(B*M, N),
-            tgt_pad_mask.view(B*M, N),
+            ens, src.view(B*M, N, -1),
             memory, cache
         )
         
@@ -214,7 +212,7 @@ def particle_filter(
     
     # next step source-side embeddings
     memory = memory.view(B, M, N, -1)[:, 0, :, :]
-    src = evolver.compute_tgt(input_ids, memory, edit_tgts)
+    src = evolver.compute_tgt(input_ids, edit_tgts, memory)
     
     return edit_tgts, src, weights[torch.arange(B, device=device), samples]
 
@@ -259,11 +257,11 @@ def fast_sample(
         if not torch.any(alive): break
         
         edit_probs, _, memory, cache = evolver.forward(
-            batch_ids, src,
+            batch_ids,
             (ens_ops[:, :i],
             ens_toks[:, :i],
             ens_idxs[:, :i]),
-            src_pad_mask,
+            src,
             None, memory, cache
         )
     

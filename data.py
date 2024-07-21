@@ -51,13 +51,16 @@ def pad_traj_edit_tgts(traj_edit_tgts, T):
     )
 
 def get_input_ids(trajectory, max_len, tokenizer):
-    return tokenizer(
-        trajectory,
-        max_length=max_len,
-        padding='max_length',
-        truncation=True,
-        return_tensors='pt'
-    )['input_ids']
+    if isinstance(trajectory[0], str):
+        return tokenizer(
+            trajectory,
+            max_length=max_len,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )['input_ids']
+        
+    return torch.tensor(trajectory)
     
 def sum_tokens(traj_input_ids):
     return sum(torch.sum(traj[-1] != PAD_TOKEN_ID) for traj in traj_input_ids)

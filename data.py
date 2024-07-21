@@ -59,8 +59,12 @@ def get_input_ids(trajectory, max_len, tokenizer):
             truncation=True,
             return_tensors='pt'
         )['input_ids']
-        
-    return torch.tensor(trajectory)
+    
+    traj_input_ids = []
+    for seq in trajectory:
+        n = len(seq)
+        traj_input_ids.append(torch.cat([seq, torch.full((max_len-n,), PAD_TOKEN_ID)]))
+    return torch.stack(traj_input_ids)
     
 def sum_tokens(traj_input_ids):
     return sum(torch.sum(traj[-1] != PAD_TOKEN_ID) for traj in traj_input_ids)

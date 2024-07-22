@@ -1,4 +1,3 @@
-import io
 import os
 import time
 import math
@@ -13,7 +12,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from simalign import SentenceAligner
 from transformers import BertTokenizer
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, DataLoader
 
 from constants import (
     PAD_TOKEN_ID, BOS_TOKEN_ID, VOCAB_SIZE,
@@ -155,6 +154,16 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
                 tok_tgts,
                 F.one_hot(idx_tgts, self.max_len)
             )
+            
+def supervised_loader(path, max_len, tokenizer, batch_size, cache_prefix, all_tokens):
+    dataset = SupervisedTrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer, cache_prefix=cache_prefix, all_tokens=all_tokens) 
+    loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_supervised, pin_memory=True)
+    return loader
+
+def unsupervised_loader(path, max_len, tokenizer, batch_size, **_):
+    dataset = TrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer)
+    loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_unsupervised)
+    return loader
     
 class SequenceDataset(Dataset):
     

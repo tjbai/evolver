@@ -19,12 +19,11 @@ from model import Evolver, Transformer
 from run import sample_trajectory
 from data import (
     elaborate,
-    collate_supervised,
-    collate_unsupervised,
     TrajectoryDataset,
-    SupervisedTrajectoryDataset,
     SequenceDataset,
-    StratifiedInfiniteSampler
+    StratifiedInfiniteSampler,
+    supervised_loader,
+    unsupervised_loader
 )
 
 logging.basicConfig()
@@ -356,17 +355,11 @@ def main():
             sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
         )
         
-        eval_dataset = TrajectoryDataset.from_disk(
+        eval_loader = unsupervised_loader(
             path=config['eval'],
             max_len=config['max_len'],
-            tokenizer=tokenizer
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
-            batch_size=config['batch_size'] // 4,
-            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
-            collate_fn=collate_unsupervised
+            tokenizer=tokenizer,
+            batch_size=config['batch_size'],
         )
 
         train_ar(
@@ -427,34 +420,20 @@ def main():
    
     ### supervised evolver
     elif prefix.startswith('sup'):
-        train_dataset = SupervisedTrajectoryDataset.from_disk(
+        train_loader = supervised_loader(
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-            cache_prefix=prefix.split('.')[0], # don't ask
+            batch_size=config['batch_size'],
+            cache_prefix=prefix.split('.')[0],
             all_tokens=config['all_tokens']
         )
         
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=collate_supervised,
-            num_workers=0,
-            pin_memory=True
-        )
-        
-        eval_dataset = TrajectoryDataset.from_disk(
+        eval_loader = unsupervised_loader(
             path=config['eval'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
             batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
-            collate_fn=collate_unsupervised
         )
         
         train_evolver(
@@ -473,30 +452,18 @@ def main():
     
     ### unsupervised evolver 
     else:
-        train_dataset = TrajectoryDataset.from_disk(
+        train_loader = unsupervised_loader(
             path=config['train'],
             max_len=config['max_len'],
-            tokenizer=tokenizer
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
+            tokenizer=tokenizer,
             batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']),
-            collate_fn=collate_unsupervised
         )
         
-        eval_dataset = TrajectoryDataset.from_disk(
+        eval_loader = unsupervised_loader(
             path=config['eval'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
             batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(eval_dataset, config['batch_size']),
-            collate_fn=collate_unsupervised
         )
         
         train_evolver(

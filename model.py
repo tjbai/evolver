@@ -184,6 +184,7 @@ class Evolver(nn.Module):
         vocab_size=VOCAB_SIZE,
         op_scale=1, tok_scale=1, idx_scale=1,
         pos_embeddings='sinu',
+        static_embeddings=False,
         device='cpu'
     ):
         super().__init__()
@@ -193,6 +194,7 @@ class Evolver(nn.Module):
         self.max_len = max_len
         self.device = device
         self.vocab_size = vocab_size
+        self.static_embeddings = static_embeddings
       
         self.embedding = nn.Embedding(vocab_size, d_model)
         
@@ -239,15 +241,33 @@ class Evolver(nn.Module):
         self.tok_head = nn.Linear(d_model, self.vocab_size)
         self.tok_head.weight = self.embedding.weight # tie weights
         self.idx_head = nn.Linear(d_model, self.max_len)
-    
-    def compute_tgt(self, input_ids, edit_tgts, memory):
+       
+    # would be equivalent to just calling get_src(output_ids)
+    def compute_tgt_static(self, input_ids, edit_tgts, *_):
+        if len(input_ids.shape) == 1: input_ids = input_ids.unsqueeze(0)
         op_ids, tok_ids, idx_ids = tuple(map(lambda x: torch.argmax(x, dim=-1), edit_tgts))
-        B, cur_len = op_ids.shape
+        B, _ = op_ids.shape
         
-        if len(input_ids.shape) == 1:
-            input_ids = input_ids.unsqueeze(0).expand(B, -1)
+        output_ids = torch.zeros_like(input_ids)
         
-        tgt = torch.zeros(B, cur_len, self.d_model, device=self.device)
+        ins_mask = op_ids.eq(INS_ID) | op_ids.eq(SUB_ID)
+        output_ids[ins_mask] = tok_ids[ins_mask]
+        
+        cpy_mask = op_ids.eq(CPY_ID)
+        output_ids[cpy_mask] = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids][cpy_mask]
+        
+        eos_mask = op_ids.eq(EOS_ID)
+        output_ids[eos_mask] = self.eos_token_id
+        
+        src, _ = self.get_src(output_ids)
+        return src
+        
+    def compute_tgt(self, input_ids, edit_tgts, memory):
+        if len(input_ids.shape) == 1: input_ids = input_ids.unsqueeze(0).expand(B, -1)
+        op_ids, tok_ids, idx_ids = tuple(map(lambda x: torch.argmax(x, dim=-1), edit_tgts))
+        B, N = op_ids.shape
+        
+        tgt = torch.zeros(B, N, self.d_model, device=self.device)
             
         memory = self.positional_embedding(memory, d=-1)
         # memory = self.depth_embedding(memory, d=-1, pos=depth)
@@ -306,7 +326,8 @@ class Evolver(nn.Module):
         src = src_0 if src is None else src
         
         memory = self.encoder(src, src_key_padding_mask=pad_mask) if memory is None else memory
-        tgt = self.compute_tgt(input_ids, edit_tgts, memory)
+        tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings \
+         else self.compute_tgt(input_ids, edit_tgts, memory)
       
         output, cache = self.decoder(
             tgt, memory,

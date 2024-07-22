@@ -282,6 +282,8 @@ def init_run(prefix, name, device, local, config):
             op_scale=config.get('op_scale', 1),
             tok_scale=config.get('tok_scale', 1),
             idx_scale=config.get('idx_scale', 1),
+            pos_embeddings=config.get('pos_embeddings', 'sinu'),
+            static_embeddings=config.get('static_embeddings', False),
             device=device
         ).to(device)
     

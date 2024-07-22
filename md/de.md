@@ -30,4 +30,17 @@ In terms of embeddings (ignoring positionals), at each step we reencode then dec
 -> s (x0) /s
 -> s' (PLH x0') (PLH) /s
 -> (PLH+x0'') (x0''+DONE) (PLH+x0'')
--> 
+-> ...
+
+## sanity check
+for sanity check, let's set rel_v = 2 (nsubj, obj) and set pos_v = 3 (PRP, NN, VRB)
+(possibly also limit vocab, but shouldn't matter in any case)
+
+a sample SVO sentence only has one "complete" forward pass:
+1. start with root (tok, rel, pos)
+2. <s> INS root INS </s> -> forward_op(..., [-1, 0, 1, 0, -1], [-1, -1, 1, -1, -1], ...)
+3. <s> INS(2) (root) INS(2) </s> -> forward_par(..., [-1, 2, -1, 2, -1], [0, 0, 1, 0, 0], ...)
+4. ... 
+5. ...
+6. ...
+

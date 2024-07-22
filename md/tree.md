@@ -58,4 +58,13 @@ think about an approach where we take index/token loss regardless of what the op
     (added per-occurrence plotting to verify this hypothesis, because otherwise our values are artifically deflated)
 
 try to compute token loss for every index (even when CPY operation is supervised)
--> for some reason makes loss worse
+-> for some reason makes loss worse -> just kidding, we had the feature flags flipped, this is actually a crucial improvement
+
+around 7/21 finally get rockfish back and try full training run, results are about 1 nat worse after 8000 steps.
+
+try some more runs with:
+- 3.4 (ablate embedding dimension) and 3.3 (moderate scaling, 2 and 4) are stuck in rockfish limbo somehow?
+
+## ud-2.*
+
+ran a brief experiment (sup-imdb-2.*) and results were pretty poor (probably unsurprisingly, "difficult")

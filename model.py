@@ -15,6 +15,8 @@ from constants import (
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID
 )
 
+from data import elaborate
+
 logging.basicConfig()
 logger = logging.getLogger('train')
 
@@ -242,13 +244,12 @@ class Evolver(nn.Module):
         self.tok_head.weight = self.embedding.weight # tie weights
         self.idx_head = nn.Linear(d_model, self.max_len)
        
-    # would be equivalent to just calling get_src(output_ids)
     def compute_tgt_static(self, input_ids, edit_tgts, *_):
         if len(input_ids.shape) == 1: input_ids = input_ids.unsqueeze(0)
         op_ids, tok_ids, idx_ids = tuple(map(lambda x: torch.argmax(x, dim=-1), edit_tgts))
-        B, _ = op_ids.shape
+        B, N = op_ids.shape
         
-        output_ids = torch.zeros_like(input_ids)
+        output_ids = torch.zeros(B, N, device=self.device, dtype=torch.long)
         
         ins_mask = op_ids.eq(INS_ID) | op_ids.eq(SUB_ID)
         output_ids[ins_mask] = tok_ids[ins_mask]

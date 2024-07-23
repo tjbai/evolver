@@ -65,6 +65,8 @@ around 7/21 finally get rockfish back and try full training run, results are abo
 try some more runs with:
 - 3.4 (ablate embedding dimension) and 3.3 (moderate scaling, 2 and 4) are stuck in rockfish limbo somehow?
 
+wandb query: sup-imdb-3.|ar-imdb-3
+
 ## ud-2.*
 
 ran a brief experiment (sup-imdb-2.*) and results were pretty poor (probably unsurprisingly, "difficult")

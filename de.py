@@ -91,8 +91,7 @@ class DependencyEvolver(nn.Module):
     def tgt_op(self, mem, tgt_op, tgt_cpy):
         B, N, _ = mem.shape
         
-        # permuted_mem = self.positional_embedding(mem, d=-1)[
-        permuted_mem = mem[
+        permuted_mem = self.positional_embedding(mem, d=-1)[
             torch.arange(B, device=mem.device).unsqueeze(1),
             self._replace(tgt_cpy, -1, 0)
         ]
@@ -101,8 +100,7 @@ class DependencyEvolver(nn.Module):
             + torch.where(tgt_op.eq(PRO_ID).unsqueeze(-1).expand_as(mem), self.done, 0) \
             + torch.where((tgt_op.eq(CPY_ID) | tgt_op.eq(PRO_ID)).unsqueeze(-1).expand_as(mem), permuted_mem, 0)
 
-        # return self.positional_embedding(tgt, d=1) 
-        return tgt
+        return self.positional_embedding(tgt, d=1)
     
     def forward_op(self, src, tgt_op, tgt_cpy, src_pad_mask, *_):
         encoder_masks = {'src_key_padding_mask': src_pad_mask}
@@ -217,7 +215,7 @@ class DependencyEvolver(nn.Module):
             
             init_pad_mask = src_pad_mask
             
-        # self._record([t / n for t, n in zip(tot, num)], step)
+        self._record([t / n for t, n in zip(tot, num)], step)
         return sum((t / n) for t, n in zip(tot, num))
     
     def _save(self, step, optim):
@@ -256,7 +254,7 @@ class DependencyEvolver(nn.Module):
             
             self.train()
             loss = self.traj_loss(root, *tgts, step=step)
-            # log({'train/loss': loss}, step=step)
+            log({'train/loss': loss}, step=step)
             
             loss.backward()
             if step % grad_accum_steps == 0:

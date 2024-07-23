@@ -79,9 +79,9 @@ class DependencyEvolver(nn.Module):
         for param in [self.done, self.plh]:
             nn.init.trunc_normal_(param, mean=0.0, std=1.0 / math.sqrt(self.d_model))
         
-    def root(self, tok, pos, N):
+    def root(self, tok, rel, pos, N):
         embeds = self.embedding(torch.tensor([self.bos_token_id, tok, self.eos_token_id]))
-        embeds[0] += self.embedding.weight[pos]
+        embeds[0] += self.embedding.weight[rel] + self.embedding.weight[pos]
         embeds = torch.cat([embeds, torch.full((N-3, self.d_model), 0)])
         return embeds.unsqueeze(0)
     
@@ -135,6 +135,8 @@ class DependencyEvolver(nn.Module):
         tgt = self.tgt_par(mem, tgt_par)
         h = self.decoder(tgt, mem, **decoder_masks)
         l = self.par_head(h)
+        
+        # TODO -- constrain?
         
         return l, tgt
     

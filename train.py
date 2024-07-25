@@ -15,7 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import BertTokenizer
 from tqdm import tqdm
 
-from model import Evolver, Transformer
+from model import Evolver, NoShareEvolver, Transformer
 from run import sample_trajectory
 from data import (
     elaborate,
@@ -271,23 +271,32 @@ def parse_model_id(s):
     return id
 
 def init_run(prefix, name, device, local, config):
-    model = \
-        (Transformer if prefix.startswith('ar') else Evolver)(
-            d_model=config['d_model'],
-            nhead=config['nhead'],
-            dim_feedforward=config['dim_feedforward'],
-            dropout=config['dropout'],
-            encoder_layers=config['encoder_layers'],
-            decoder_layers=config['decoder_layers'],
-            max_len=config['max_len'],
-            op_scale=config.get('op_scale', 1),
-            tok_scale=config.get('tok_scale', 1),
-            idx_scale=config.get('idx_scale', 1),
-            positional_embeddings=config.get('positional_embeddings', 'sinu'),
-            static_embeddings=config.get('static_embeddings', False),
-            depth_embeddings=config.get('depth_embeddings', False),
-            device=device
-        ).to(device)
+    num_encoders = config.get('num_encoders', 1)
+    num_decoders = config.get('num_decoders', 1)
+
+    Model = \
+    Transformer if prefix.startswith('ar') \
+    else NoShareEvolver if (num_encoders > 1 or num_decoders > 1) \
+    else Evolver
+
+    model = Model(
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        dim_feedforward=config['dim_feedforward'],
+        dropout=config['dropout'],
+        encoder_layers=config['encoder_layers'],
+        decoder_layers=config['decoder_layers'],
+        max_len=config['max_len'],
+        op_scale=config.get('op_scale', 1),
+        tok_scale=config.get('tok_scale', 1),
+        idx_scale=config.get('idx_scale', 1),
+        positional_embeddings=config.get('positional_embeddings', 'sinu'),
+        static_embeddings=config.get('static_embeddings', False),
+        depth_embeddings=config.get('depth_embeddings', False),
+        num_encoders=num_encoders,
+        num_decoders=num_decoders,
+        device=device
+    ).to(device)
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     

@@ -1,0 +1,25 @@
+{
+    "train": "data/toy/toy.jsonl",
+    "eval": "data/toy/toy.jsonl",
+
+    "d_model": 64,
+    "nhead": 8,
+    "max_len": 10,
+    "dim_feedforward": 256,
+    "dropout": 0.0,
+    "encoder_layers": 3,
+    "decoder_layers": 3,
+
+    "lr": 3e-4,
+    "warmup_percent": 0.0,
+    "clip_gradients": false,
+    "train_steps": 500,
+    "eval_steps": 50,
+    "batch_size": 1,
+    "grad_accum_steps": 1,
+    "checkpoint_at": 500,
+    "eval_at": 100,
+
+    "num_encoders": 2,
+    "num_decoders": 2
+}

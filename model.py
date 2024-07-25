@@ -233,6 +233,43 @@ class Evolver(nn.Module):
     
         N = torch.sum(~(traj_input_ids.eq(PAD_TOKEN_ID)[:, 1:, :])) 
         return traj_loss, tot[0] / N, tot[1] / N, tot[2] / N
+
+class NoShareEvolver(Evolver):
+
+    def __init__(self, *args, **kwargs, num_encoders=10, num_decoders=10):
+        super().__init__(*args, **kwargs)
+        self.num_encoders = num_encoders
+        self.num_decoders = num_decoders
+        self.encoders = [copy.deepcopy(self.encoder) for _ in range(num_encoders)]
+        self.decoders = [copy.deepcopy(self.encoder) for _ in range(num_decoders)]
+
+    def forward(
+        self, input_ids, edit_tgts,
+        src=None, t=None,
+        memory=None, cache=None
+    ):
+        B, N = input_ids.shape
+
+        if self.training and memory is not None: raise Exception()
+        if self.training and cache is not None: raise Exception()
+        if t is None: raise Exception('need depth in no share evolver')
+
+        src_0, pad_mask = self.get_src(input_ids)
+        src = src_0 if src is None else src
+
+        cur_encoder = self.encoders[t % self.num_encoders]
+        cur_decoder = self.encoders[t % self.num_decoders]
+
+        memory = cur_encoder(src, depth_embed=None, src_key_padding_mask=pad_mask) if memory is None else memory
+        tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)
+        output, cache = cur_decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
+
+        op_logits = self.op_head(output)
+        tok_logits = self.tok_head(output)
+        idx_logits = self.idx_head(output)
+
+        probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
+        return probs, tgt, memory, cache
     
 class Transformer(nn.Module):
     

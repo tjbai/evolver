@@ -39,19 +39,19 @@ def sample_trajectory(
     traj_tok_tgts = torch.zeros(B, T-1, N, VOCAB_SIZE, device=device)
     traj_idx_tgts = torch.zeros(B, T-1, N, N, device=device)
 
-    for i in range(T-1):
+    for t in range(T-1):
         # print(f'\n### new trajectory step {i}')
         
         edit_tgts, src, log_prob = particle_filter(
-            evolver, traj_input_ids[:, i], traj_input_ids[:, i+1],
-            src, traj_pad_mask[:, i, :], traj_pad_mask[:, i+1, :],
+            evolver, traj_input_ids[:, t], traj_input_ids[:, t+1],
+            src, t, traj_pad_mask[:, t, :], traj_pad_mask[:, t+1, :],
             num_particles, threshold, temperature, resample_at
         )
         
         traj_log_prob += log_prob
-        traj_op_tgts[:, i] = edit_tgts[0]
-        traj_tok_tgts[:, i] = edit_tgts[1]
-        traj_idx_tgts[:, i] = edit_tgts[2]
+        traj_op_tgts[:, t] = edit_tgts[0]
+        traj_tok_tgts[:, t] = edit_tgts[1]
+        traj_idx_tgts[:, t] = edit_tgts[2]
         
     return (traj_op_tgts, traj_tok_tgts, traj_idx_tgts), traj_log_prob
 
@@ -94,7 +94,8 @@ def particle_filter(
     evolver,
     input_ids,    # BxN
     output_ids,   # BxN
-    src,          # BxNxD 
+    src,          # BxNxD
+    t,            # int ¯\_(ツ)_/¯
     src_pad_mask, # BxN
     tgt_pad_mask, # BxN
     M, threshold,
@@ -139,8 +140,8 @@ def particle_filter(
         ))
         
         edit_probs, _, memory, cache = evolver.forward(
-            batch_ids.view(B*M, N),
-            ens, src.view(B*M, N, -1),
+            batch_ids.view(B*M, N), ens,
+            src.view(B*M, N, -1), t,
             memory, cache
         )
         
@@ -247,22 +248,18 @@ def fast_sample(
     ens_ops[:, 1:, PAD_ID] = 1
    
     memory = cache = None
-    for i in range(1, N):
+    for t in range(1, N):
         
         # handle pad
-        ens_ops[~alive, i, PAD_ID] = 1
-        ens_toks[~alive, i, PAD_TOKEN_ID] = 1
-        ens_idxs[~alive, i, 0] = 1
+        ens_ops[~alive, t, PAD_ID] = 1
+        ens_toks[~alive, t, PAD_TOKEN_ID] = 1
+        ens_idxs[~alive, t, 0] = 1
         
         if not torch.any(alive): break
         
         edit_probs, _, memory, cache = evolver.forward(
-            batch_ids,
-            (ens_ops[:, :i],
-            ens_toks[:, :i],
-            ens_idxs[:, :i]),
-            src,
-            None, memory, cache
+            batch_ids, (ens_ops[:, :t], ens_toks[:, :t], ens_idxs[:, :t]),
+            src, t, memory, cache
         )
     
         op_probs, tok_probs, idx_probs = tuple(map(
@@ -275,9 +272,9 @@ def fast_sample(
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
     
         # handle eos 
-        ens_ops[alive & ops.eq(EOS_ID), i, EOS_ID] = 1
-        ens_toks[alive & ops.eq(EOS_ID), i, PAD_TOKEN_ID] = 1
-        ens_idxs[alive & ops.eq(EOS_ID), i, 0] = 1
+        ens_ops[alive & ops.eq(EOS_ID), t, EOS_ID] = 1
+        ens_toks[alive & ops.eq(EOS_ID), t, PAD_TOKEN_ID] = 1
+        ens_idxs[alive & ops.eq(EOS_ID), t, 0] = 1
         
         # update the living
         alive &= ~ops.eq(EOS_ID)

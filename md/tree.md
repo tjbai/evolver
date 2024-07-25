@@ -62,10 +62,9 @@ try to compute token loss for every index (even when CPY operation is supervised
 
 around 7/21 finally get rockfish back and try full training run, results are about 1 nat worse after 8000 steps.
 
-try some more runs with:
-- 3.4 (ablate embedding dimension) and 3.3 (moderate scaling, 2 and 4) are stuck in rockfish limbo somehow?
-
-wandb query: sup-imdb-3.|ar-imdb-3
+all 3* runs: sup-imdb-3.|ar-imdb-3
+static vs. dynamic: sup-imdb-3.[235]
+different embedding sizes: 
 
 ## ud-2.*
 

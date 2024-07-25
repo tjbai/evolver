@@ -15,11 +15,10 @@
     "clip_gradients": false,
     "train_steps": 500,
     "eval_steps": 50,
-    "batch_size": 2,
+    "batch_size": 1,
     "grad_accum_steps": 1,
     "checkpoint_at": 500,
     "eval_at": 100,
 
-    "all_tokens": true,
-    "static_embeddings": true
+    "depth_embeddings": true
 }

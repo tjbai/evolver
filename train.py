@@ -100,18 +100,19 @@ def train_evolver(
         # M-step
         s = time.time()
         evolver.train()
-        traj_loss, op_loss, tok_loss, idx_loss = \
-            evolver.traj_loss(traj_input_ids, traj_edit_tgts, step=step)
+        traj_loss, op_loss, tok_loss, idx_loss = evolver.traj_loss(traj_input_ids, traj_edit_tgts, step=step)
             
         traj_loss.backward()
         record_grad_norms(evolver, step)
-        if clip_gradients: clip_grad_norm_(evolver.parameters(), 1)
+        if clip_gradients:
+            clip_grad_norm_(evolver.parameters(), 1)
         
         if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
             
-        if lr_scheduler: lr_scheduler.step()
+        if lr_scheduler:
+            lr_scheduler.step()
         
         log({
             'train/total_loss': op_loss + tok_loss + idx_loss,
@@ -274,16 +275,17 @@ def init_run(prefix, name, device, local, config):
         (Transformer if prefix.startswith('ar') else Evolver)(
             d_model=config['d_model'],
             nhead=config['nhead'],
-            max_len=config['max_len'],
-            dropout=config['dropout'],
             dim_feedforward=config['dim_feedforward'],
+            dropout=config['dropout'],
             encoder_layers=config['encoder_layers'],
             decoder_layers=config['decoder_layers'],
+            max_len=config['max_len'],
             op_scale=config.get('op_scale', 1),
             tok_scale=config.get('tok_scale', 1),
             idx_scale=config.get('idx_scale', 1),
-            pos_embeddings=config.get('pos_embeddings', 'sinu'),
+            positional_embeddings=config.get('positional_embeddings', 'sinu'),
             static_embeddings=config.get('static_embeddings', False),
+            depth_embeddings=config.get('depth_embeddings', False),
             device=device
         ).to(device)
     
@@ -428,7 +430,7 @@ def main():
             tokenizer=tokenizer,
             batch_size=config['batch_size'],
             cache_prefix=prefix.split('.')[0],
-            all_tokens=config['all_tokens']
+            all_tokens=config.get('all_tokens', False)
         )
         
         eval_loader = unsupervised_loader(

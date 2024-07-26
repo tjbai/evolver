@@ -271,12 +271,12 @@ def parse_model_id(s):
     return id
 
 def init_run(prefix, name, device, local, config):
-    num_encoders = config.get('num_encoders', 1)
-    num_decoders = config.get('num_decoders', 1)
+    num_encoders = config.get('num_encoders', 0)
+    num_decoders = config.get('num_decoders', 0)
 
     Model = \
     Transformer if prefix.startswith('ar') \
-    else NoShareEvolver if (num_encoders > 1 or num_decoders > 1) \
+    else NoShareEvolver if (num_encoders >= 1 or num_decoders >= 1) \
     else Evolver
 
     model = Model(

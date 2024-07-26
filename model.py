@@ -66,7 +66,8 @@ class Evolver(nn.Module):
         positional_embeddings='sinu',
         static_embeddings=False,
         depth_embeddings=False,
-        device='cpu'
+        device='cpu',
+        **_,
     ):
         super().__init__()
         
@@ -236,12 +237,12 @@ class Evolver(nn.Module):
 
 class NoShareEvolver(Evolver):
 
-    def __init__(self, *args, **kwargs, num_encoders=10, num_decoders=10):
+    def __init__(self, *args, num_encoders=1, num_decoders=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_encoders = num_encoders
         self.num_decoders = num_decoders
-        self.encoders = [copy.deepcopy(self.encoder) for _ in range(num_encoders)]
-        self.decoders = [copy.deepcopy(self.encoder) for _ in range(num_decoders)]
+        self.encoders = nn.ModuleList([copy.deepcopy(self.encoder) for _ in range(num_encoders)])
+        self.decoders = nn.ModuleList([copy.deepcopy(self.decoder) for _ in range(num_decoders)])
 
     def forward(
         self, input_ids, edit_tgts,
@@ -249,7 +250,7 @@ class NoShareEvolver(Evolver):
         memory=None, cache=None
     ):
         B, N = input_ids.shape
-
+        
         if self.training and memory is not None: raise Exception()
         if self.training and cache is not None: raise Exception()
         if t is None: raise Exception('need depth in no share evolver')
@@ -258,7 +259,7 @@ class NoShareEvolver(Evolver):
         src = src_0 if src is None else src
 
         cur_encoder = self.encoders[t % self.num_encoders]
-        cur_decoder = self.encoders[t % self.num_decoders]
+        cur_decoder = self.decoders[t % self.num_decoders]
 
         memory = cur_encoder(src, depth_embed=None, src_key_padding_mask=pad_mask) if memory is None else memory
         tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)

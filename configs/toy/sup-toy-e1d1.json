@@ -17,7 +17,7 @@
     "eval_steps": 50,
     "batch_size": 1,
     "grad_accum_steps": 1,
-    "checkpoint_at": 500,
+    "checkpoint_at": 501,
     "eval_at": 100,
 
     "num_encoders": 1,

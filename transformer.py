@@ -74,7 +74,7 @@ class TransformerEncoder(nn.Module):
     
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
-        self.layers = [copy.deepcopy(encoder_layer) for _ in range(num_layers)]
+        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_layers)])
         self.num_layers = num_layers
         
     def forward(self, src, depth_embed=None, src_mask=None, src_key_padding_mask=None, is_causal=False):

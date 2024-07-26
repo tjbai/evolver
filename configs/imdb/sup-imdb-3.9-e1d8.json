@@ -1,0 +1,32 @@
+{
+    "train": "data/imdb/imdb_train_3.jsonl",
+    "eval": "data/imdb/imdb_dev_3.jsonl",
+
+    "d_model": 512,
+    "nhead": 8,
+    "max_len": 512,
+    "dim_feedforward": 2048,
+    "dropout": 0.1,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+    "lr": 8e-4,
+
+    "warmup_percent": 0.1,
+    "clip_gradients": false,
+    "train_steps": 8000,
+    "eval_steps": 30,
+    "batch_size": 4,
+    "grad_accum_steps": 4,
+    "checkpoint_at": 1000,
+    "eval_at": 400,
+
+    "static_embeddings": false,
+    "depth_embeddings": true,
+    "all_tokens": true,
+    "op_scale": 1,
+    "tok_scale": 1,
+    "idx_scale": 1,
+
+    "num_encoders": 1,
+    "num_decoders": 8
+}

@@ -1,0 +1,30 @@
+{
+    "train": "data/imdb/imdb_train_3.jsonl",
+    "eval": "data/imdb/imdb_dev_3.jsonl",
+    "notes": "bump embedding dimension MORE",
+    "from_checkpoint": "/scratch4/jeisner1/checkpoints/sup-imdb-3.6_20240723_002346-6000.pt",
+    "resume": true,
+
+    "d_model": 1024,
+    "nhead": 8,
+    "max_len": 512,
+    "dim_feedforward": 4096,
+    "dropout": 0.1,
+    "encoder_layers": 8,
+    "decoder_layers": 8,
+    "lr": 8e-4,
+
+    "warmup_percent": 0.1,
+    "clip_gradients": false,
+    "train_steps": 8000,
+    "eval_steps": 30,
+    "batch_size": 4,
+    "grad_accum_steps": 4,
+    "checkpoint_at": 1000,
+    "eval_at": 400,
+
+    "all_tokens": true,
+    "op_scale": 1,
+    "tok_scale": 1,
+    "idx_scale": 1
+}

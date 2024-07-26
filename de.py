@@ -9,13 +9,12 @@ import torch.nn.functional as F
 from torch.nn import Transformer as T
 from tqdm import tqdm
 
-from constants import *
 from model import SinusoidalEmbedding
+from constants import PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID, VOCAB_SIZE
 
-INS_ID = 0
-CPY_ID = 1
-PRO_ID = 2
-EOS_ID = 3
+# TODO -- this vocab_size comes from gum
+TOK_V, REL_V, POS_V = 17775, 69, 17
+INS_ID, CPY_ID, PRO_ID, EOS_ID = 0, 1, 2, 3
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 
@@ -27,12 +26,16 @@ class DependencyEvolver(nn.Module):
     
     def __init__(
         self,
-        d_model=512, dim_feedforward=2048, nhead=8, dropout=0.1, N=64,
-        encoder_layers=6, decoder_layers=6,
-        tok_v=VOCAB_SIZE, rel_v=0, pos_v=0,
-        pad_token_id=PAD_TOKEN_ID,
-        bos_token_id=BOS_TOKEN_ID,
-        eos_token_id=EOS_TOKEN_ID,
+        d_model=512,
+        nhead=8,
+        dim_feedforward=2048,
+        dropout=0.1,
+        encoder_layers=6,
+        decoder_layers=6,
+        N=64,
+        tok_v=VOCAB_SIZE,
+        rel_v=REL_V,
+        pos_v=POS_V,
         name='test',
         device='cuda' if torch.cuda.is_available() else 'cpu'
     ):
@@ -40,14 +43,12 @@ class DependencyEvolver(nn.Module):
         
         self.N = N
         self.d_model = d_model
-        self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
         self.name = name
         self.device = device
-        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool)
         self.rel_offset = tok_v
         self.pos_offset = tok_v + rel_v
+        self.vocab_size = tok_v + rel_v + pos_v + 1 # add one for UNK
+        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool)
         
         codec_params = {
             'd_model': d_model,
@@ -63,7 +64,7 @@ class DependencyEvolver(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(**codec_params)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
         
-        self.embedding = nn.Embedding(tok_v+rel_v+pos_v, d_model)
+        self.embedding = nn.Embedding(self.vocab_size, d_model)
         self.positional_embedding = SinusoidalEmbedding(d_model, max_len=N)
         
         self.op_head = nn.Linear(d_model, 4)
@@ -73,16 +74,18 @@ class DependencyEvolver(nn.Module):
        
         self.done = nn.Parameter(torch.zeros(d_model))
         self.plh = nn.Parameter(torch.zeros(d_model))
+        self.root_bos = nn.Parameter(torch.zeros(d_model))
+        self.root_eos = nn.Parameter(torch.zeros(d_model))
         self.init_params()
     
     def init_params(self):
-        for param in [self.done, self.plh]:
+        for param in [self.done, self.plh, self.root_bos, self.root_eos]:
             nn.init.trunc_normal_(param, mean=0.0, std=1.0 / math.sqrt(self.d_model))
         
-    def root(self, tok, rel, pos, N):
-        embeds = self.embedding(torch.tensor([self.bos_token_id, tok, self.eos_token_id]))
-        embeds[0] += self.embedding.weight[rel] + self.embedding.weight[pos]
-        embeds = torch.cat([embeds, torch.full((N-3, self.d_model), 0)])
+    def root(self, tok, rel, pos):
+        root = (self.embedding.weight[tok] + self.embedding.weight[rel] + self.embedding.weight[pos]).unsqueeze(0)
+        embeds = torch.cat([self.root_bos.unsqueeze(0), root, self.root_eos.unsqueeze(0)], dim=0)
+        embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0)])
         return embeds.unsqueeze(0)
     
     def _replace(self, t, a, b):
@@ -96,9 +99,10 @@ class DependencyEvolver(nn.Module):
             self._replace(tgt_cpy, -1, 0)
         ]
        
-        tgt = torch.where(tgt_op.eq(INS_ID).unsqueeze(-1).expand_as(mem), self.plh, 0) \
+        tgt = torch.where((tgt_op.eq(CPY_ID) | tgt_op.eq(PRO_ID)).unsqueeze(-1).expand_as(mem), permuted_mem, 0) \
+            + torch.where(tgt_op.eq(INS_ID).unsqueeze(-1).expand_as(mem), self.plh, 0) \
             + torch.where(tgt_op.eq(PRO_ID).unsqueeze(-1).expand_as(mem), self.done, 0) \
-            + torch.where((tgt_op.eq(CPY_ID) | tgt_op.eq(PRO_ID)).unsqueeze(-1).expand_as(mem), permuted_mem, 0)
+            + torch.where(tgt_op.eq(EOS_ID).unsqueeze(-1).expand_as(mem), mem, 0) \
 
         return self.positional_embedding(tgt, d=1)
     
@@ -142,7 +146,7 @@ class DependencyEvolver(nn.Module):
     
     def tgt_gen(self, mem, tgt_gen):
         embeds = self.embedding(self._replace(tgt_gen, -1, 0))
-        return mem + torch.where(~tgt_gen.eq(-1).unsqueeze(-1).expand_as(mem), embeds, 0)
+        return mem + torch.where(~(tgt_gen.eq(-1) | tgt_gen.eq(BOS_TOKEN_ID)).unsqueeze(-1).expand_as(mem), embeds, 0)
     
     def forward_gen(self, src, tgt_gen, _, src_pad_mask, tgt_pad_mask):
         encoder_masks = {'src_key_padding_mask': src_pad_mask}
@@ -198,14 +202,13 @@ class DependencyEvolver(nn.Module):
         tot = [0 for _ in range(6)]
         num = [0 for _ in range(6)]
         
-        src = self.root(*root, self.N)
+        src = self.root(*root)
         init_pad_mask = torch.full((B, N), True)
         init_pad_mask[:, :3] = False
         
         for i in range(T):
             src_pad_mask = op_traj[i].eq(-1)
             tgt_pad_mask = rel_traj[i].eq(-1)
-            tgt_pad_mask[:, 0] = False
             
             pad_masks = (init_pad_mask, src_pad_mask, tgt_pad_mask)
             ls = self.forward(src, pad_masks, *(t[i] for t in tgts))

@@ -1,19 +1,29 @@
 import os
+import json
 import time
 import math
+import pickle
+import logging
+import argparse
+from datetime import datetime
 
 import wandb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import AdamW
 from torch.nn import Transformer as T
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from model import SinusoidalEmbedding
-from constants import PAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID, VOCAB_SIZE
 
-# TODO -- this vocab_size comes from gum
-TOK_V, REL_V, POS_V = 17775, 69, 17
+logging.basicConfig()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# TODO -- these default come from gum
+TOK_V, REL_V, POS_V = 19030, 69, 17
 INS_ID, CPY_ID, PRO_ID, EOS_ID = 0, 1, 2, 3
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
@@ -21,6 +31,41 @@ REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 def log(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: print(f"step {step}: {data}")
+    
+class ParseDataset(Dataset):
+    
+    @classmethod
+    def from_pkl(cls, path, *args, **kwargs):
+        with open(path, 'rb') as f:
+            samples = pickle.load(f)
+            return cls(samples, *args, **kwargs)
+   
+    # each sample is a (root, tgt)  tuple
+    def __init__(self, samples):
+        self.samples = samples
+        
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, i):
+        return self.samples[i]
+    
+def collate_single(sample):
+    assert len(sample) == 1
+    
+    [(root, traj)] = sample
+
+    # the java is rubbing off on me
+    tgts = torch.tensor(traj) \
+                .transpose(0, 1) \
+                .unsqueeze(2)
+                
+    return root, tgts
+
+def single_loader(path, shuffle=True):
+    dataset = ParseDataset.from_pkl(path) 
+    loader = DataLoader(dataset, batch_size=1, collate_fn=collate_single, shuffle=shuffle)
+    return loader
 
 class DependencyEvolver(nn.Module):
     
@@ -33,7 +78,7 @@ class DependencyEvolver(nn.Module):
         encoder_layers=6,
         decoder_layers=6,
         N=64,
-        tok_v=VOCAB_SIZE,
+        tok_v=TOK_V,
         rel_v=REL_V,
         pos_v=POS_V,
         name='test',
@@ -146,7 +191,7 @@ class DependencyEvolver(nn.Module):
     
     def tgt_gen(self, mem, tgt_gen):
         embeds = self.embedding(self._replace(tgt_gen, -1, 0))
-        return mem + torch.where(~(tgt_gen.eq(-1) | tgt_gen.eq(BOS_TOKEN_ID)).unsqueeze(-1).expand_as(mem), embeds, 0)
+        return mem + torch.where(~tgt_gen.eq(-1).unsqueeze(-1).expand_as(mem), embeds, 0)
     
     def forward_gen(self, src, tgt_gen, _, src_pad_mask, tgt_pad_mask):
         encoder_masks = {'src_key_padding_mask': src_pad_mask}
@@ -194,11 +239,13 @@ class DependencyEvolver(nn.Module):
         mask = t != ignore
         return -F.log_softmax(l[mask], dim=-1).gather(1, t[mask].unsqueeze(1))
    
-    # op, cpy, par, rel, pos, tok
-    def traj_loss(self, root, *tgts, step=None):
-        op_traj, _, _, rel_traj, *_ =tgts 
+    '''
+    TODO -- write some documentation for when i inevitably forget how this works
+            lots of mental overhead with the way i handle pad masks, etc. here
+    ''' 
+    def traj_loss(self, root, tgts, step=None):
+        T, _, B, N = tgts.shape
         
-        T, B, N = tgts[0].shape
         tot = [0 for _ in range(6)]
         num = [0 for _ in range(6)]
         
@@ -207,21 +254,23 @@ class DependencyEvolver(nn.Module):
         init_pad_mask[:, :3] = False
         
         for i in range(T):
-            src_pad_mask = op_traj[i].eq(-1)
-            tgt_pad_mask = rel_traj[i].eq(-1)
+            src_pad_mask = tgts[i, 0].eq(-1)
+            tgt_pad_mask = tgts[i, 3].eq(-1)
+            tgt_pad_mask[:, 0] = False
             
             pad_masks = (init_pad_mask, src_pad_mask, tgt_pad_mask)
-            ls = self.forward(src, pad_masks, *(t[i] for t in tgts))
+            ls = self.forward(src, pad_masks, *(t for t in tgts[i]))
             
-            for j, (l, t) in enumerate(zip(ls, tgts)):
-                loss = self.xent(l, t[i])
+            for j, (l, t) in enumerate(zip(ls, tgts[i])):
+                loss = self.xent(l, t)
                 tot[j] += torch.sum(loss)
                 num[j] += torch.numel(loss)
             
             init_pad_mask = src_pad_mask
             
-        self._record([t / n for t, n in zip(tot, num)], step)
-        return sum((t / n) for t, n in zip(tot, num))
+        loss = [(t/n if n > 0 else 0) for t, n in zip(tot, num)]
+        self._record(loss, step)
+        return sum(loss)
     
     def _save(self, step, optim):
         path = f'{REMOTE_PREFIX}/checkpoints' if self.device == 'cuda' else 'checkpoints'
@@ -255,10 +304,10 @@ class DependencyEvolver(nn.Module):
             total=train_steps
         ):
             if step >= train_steps: break
-            tgts = tuple(map(lambda x: x.to(self.device), tgts))
+            tgts = tgts.to(self.device)
             
             self.train()
-            loss = self.traj_loss(root, *tgts, step=step)
+            loss = self.traj_loss(root, tgts, step=step)
             log({'train/loss': loss}, step=step)
             
             loss.backward()
@@ -273,3 +322,93 @@ class DependencyEvolver(nn.Module):
                 s = time.time()
                 loss = self._eval(eval_loader, eval_steps)
                 log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
+                
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config')
+    parser.add_argument('--local', action='store_true')
+    return parser.parse_args()
+
+def init_run(config, name, local):
+    
+    with open(config['tok_v'], 'r') as f: tok_v = len(f.readlines())
+    with open(config['pos_v'], 'r') as f: pos_v = len(f.readlines())
+    with open(config['rel_v'], 'r') as f: rel_v = len(f.readlines())
+    
+    model = DependencyEvolver(
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        dim_feedforward=config['dim_feedforward'],
+        dropout=config['dropout'],
+        encoder_layers=config['encoder_layers'],
+        decoder_layers=config['decoder_layers'],
+        N=config['N'],
+        tok_v=tok_v,
+        rel_v=rel_v,
+        pos_v=pos_v,
+        name=name
+    )
+    
+    optim = AdamW(model.parameters(), lr=config['lr'])
+    
+    start_step = 0
+    wandb_run_id = None 
+    if 'from_checkpoint' in config:
+        logger.info(f'loading from {config["from_checkpoint"]}')
+        checkpoint = torch.load(config['from_checkpoint'])
+        model.load_state_dict(checkpoint['model'])
+
+        if 'resume' in config:
+            optim.load_state_dict(checkpoint['optim'])
+            start_step = checkpoint['step'] + 1
+            wandb_run_id = checkpoint['wandb_run_id']
+            logger.info(f'resuming from {start_step}')
+
+    if wandb_run_id is None:
+        wandb_run_id = wandb.util.generate_id()
+        logger.info('starting new run')
+    
+    if not local:
+        wandb.init(
+            id=wandb_run_id,
+            project='evolver',
+            name=name,
+            config=config,
+            resume='allow',
+            notes=config.get('notes', 'N/A')
+        )
+    
+    return model, optim, start_step
+
+def parse_model_id(s):
+    _, name = os.path.split(s)
+    id = '.'.join(name.split('.')[:-1]) or name
+    return id
+                
+def main():
+    args = parse_args()
+    
+    with open(args.config, 'r') as f: config = json.load(f)
+    
+    prefix = parse_model_id(args.config)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f'{prefix}_{timestamp}'
+    
+    model, optim, start_step = init_run(config, name, args.local)
+    train_loader = single_loader(config['train'])
+    eval_loader = single_loader(config['eval'])
+    
+    model._train(
+        optim=optim,
+        train_loader=train_loader,
+        eval_loader=eval_loader,
+        train_steps=config['train_steps'],
+        eval_steps=config['eval_steps'],
+        grad_accum_steps=config['grad_accum_steps'],
+        checkpoint_at=config['checkpoint_at'],
+        eval_at=config['eval_at'],
+        start_step=start_step
+    )
+                
+if __name__ == '__main__':
+    main()

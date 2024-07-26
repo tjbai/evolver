@@ -6,7 +6,7 @@ if [ $# -lt 1 ] || [ $# -gt 2 ]; then
 fi
 
 config_path="$1"
-job_name=$(basename "$config_path" .json)
+job_name=$(basename "$config_path" .json
 
 cat << EOF > "slurm/${job_name}.sh"
 #!/bin/bash

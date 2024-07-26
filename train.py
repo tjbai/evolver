@@ -271,6 +271,8 @@ def parse_model_id(s):
     return id
 
 def init_run(prefix, name, device, local, config):
+    
+    # NOTE -- this is not the same as encoder_layers and decoder_layers
     num_encoders = config.get('num_encoders', 0)
     num_decoders = config.get('num_decoders', 0)
 

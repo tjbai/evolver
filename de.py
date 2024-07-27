@@ -93,7 +93,7 @@ class DependencyEvolver(nn.Module):
         self.rel_offset = tok_v
         self.pos_offset = tok_v + rel_v
         self.vocab_size = tok_v + rel_v + pos_v + 1 # add one for UNK
-        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool)
+        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
         
         codec_params = {
             'd_model': d_model,
@@ -130,7 +130,7 @@ class DependencyEvolver(nn.Module):
     def root(self, tok, rel, pos):
         root = (self.embedding.weight[tok] + self.embedding.weight[rel] + self.embedding.weight[pos]).unsqueeze(0)
         embeds = torch.cat([self.root_bos.unsqueeze(0), root, self.root_eos.unsqueeze(0)], dim=0)
-        embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0)])
+        embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0, device=self.device)])
         return embeds.unsqueeze(0)
     
     def _replace(self, t, a, b):
@@ -182,6 +182,7 @@ class DependencyEvolver(nn.Module):
         
         mem = self.encoder(src, **encoder_masks)
         tgt = self.tgt_par(mem, tgt_par)
+
         h = self.decoder(tgt, mem, **decoder_masks)
         l = self.par_head(h)
         
@@ -223,7 +224,8 @@ class DependencyEvolver(nn.Module):
         return l_op, l_cpy, l_par, l_rel, l_pos, l_tok
     
     def _record(self, ls, step):
-        prefix = 'train' if self.training else 'eval'
+        # prefix = 'train' if self.training else 'eval'
+        prefix = 'train'
         log({
             f'{prefix}/op': ls[0],
             f'{prefix}/cpy': ls[1],
@@ -250,7 +252,7 @@ class DependencyEvolver(nn.Module):
         num = [0 for _ in range(6)]
         
         src = self.root(*root)
-        init_pad_mask = torch.full((B, N), True)
+        init_pad_mask = torch.full((B, N), True, device=self.device)
         init_pad_mask[:, :3] = False
         
         for i in range(T):
@@ -269,7 +271,7 @@ class DependencyEvolver(nn.Module):
             init_pad_mask = src_pad_mask
             
         loss = [(t/n if n > 0 else 0) for t, n in zip(tot, num)]
-        self._record(loss, step)
+        if self.training: self._record(loss, step)
         return sum(loss)
     
     def _save(self, step, optim):
@@ -287,9 +289,10 @@ class DependencyEvolver(nn.Module):
         tot = n = 0
         for step, (root, tgts) in enumerate(eval_loader):
             if step >= eval_steps: break
-            tgts = tuple(map(lambda x: x.to(self.device), tgts))
-            tot += self.traj_loss(root, *tgts)
-            n += tgts[0].shape[0] + torch.sum(tgts[0] != -1)
+            tgts = tgts.to(self.device)
+            tot += self.traj_loss(root, tgts)
+            # n += tgts[0].shape[0] + torch.sum(tgts[0] != -1)
+            n += torch.sum(tgts[-1, 0] != -1)
     
         return tot / n
     
@@ -347,9 +350,7 @@ def init_run(config, name, local):
         rel_v=rel_v,
         pos_v=pos_v,
         name=name
-    )
-    
-    model = model.to(model.device)
+    ).to('cuda' if torch.cuda.is_available() else 'cpu')
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     

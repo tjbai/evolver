@@ -21,7 +21,7 @@
     "eval_at": 400,
 
     "static_embeddings": false,
-    "depth_embeddings": true,
+    "depth_embeddings": false,
     "all_tokens": true,
     "op_scale": 1,
     "tok_scale": 1,

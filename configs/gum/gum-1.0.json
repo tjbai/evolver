@@ -14,9 +14,9 @@
     "N": 64,
     "lr": 3e-4,
 
-    "train_steps": 1000,
-    "eval_steps": 20,
-    "grad_accum_steps": 8,
-    "checkpoint_at": 1000,
-    "eval_at": 100
+    "train_steps": 15000,
+    "eval_steps": 50,
+    "grad_accum_steps": 16,
+    "checkpoint_at": 15000,
+    "eval_at": 150
 }

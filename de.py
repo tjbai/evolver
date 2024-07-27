@@ -245,7 +245,7 @@ class DependencyEvolver(nn.Module):
     TODO -- write some documentation for when i inevitably forget how this works
             lots of mental overhead with the way i handle pad masks, etc. here
     ''' 
-    def traj_loss(self, root, tgts, step=None):
+    def traj_loss(self, root, tgts, step=None, reduce=True):
         T, _, B, N = tgts.shape
         
         tot = [0 for _ in range(6)]
@@ -272,7 +272,178 @@ class DependencyEvolver(nn.Module):
             
         loss = [(t/n if n > 0 else 0) for t, n in zip(tot, num)]
         if self.training: self._record(loss, step)
-        return sum(loss)
+        return sum(loss) if reduce else sum(tot)
+    
+    def _save(self, step, optim):
+        path = f'{REMOTE_PREFIX}/checkpoints' if self.device == 'cuda' else 'checkpoints'
+        torch.save({
+            'step': step,
+            'model': self.state_dict(),
+            'optim': optim.state_dict(),
+            'wandb_run_id': None if wandb.run is None else wandb.run.id
+        }, f'{path}/{self.name}-{step+1}.pt')
+        
+    def _eval(self, eval_loader, eval_steps):
+        self.eval()
+      
+        tot = n = 0
+        for step, (root, tgts) in enumerate(eval_loader):
+            if step >= eval_steps: break
+            tgts = tgts.to(self.device)
+            tot += self.traj_loss(root, tgts, reduce=False)
+            n += torch.sum(tgts[-1, 0] != -1)
+            
+        return tot / n
+    
+    def _train(
+        self, optim, train_loader, eval_loader,
+        train_steps, eval_steps, grad_accum_steps,
+        checkpoint_at, eval_at,
+        start_step=0
+    ):
+        for step, (root, tgts) in tqdm(
+            enumerate(train_loader, start=start_step),
+            total=train_steps
+        ):
+            if step >= train_steps: break
+            tgts = tgts.to(self.device)
+            
+            self.train()
+            loss = self.traj_loss(root, tgts, step=step)
+            log({'train/loss': loss}, step=step)
+            
+            loss.backward()
+            if step % grad_accum_steps == 0:
+                optim.step()
+                optim.zero_grad()
+            
+            if (step + 1) % checkpoint_at == 0:
+                self._save(step, optim)
+                
+            if (step + 1) % eval_at == 0:
+                s = time.time()
+                loss = self._eval(eval_loader, eval_steps)
+                log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
+                
+class StaticDependencyEvolver(DependencyEvolver):
+    
+    def __init__(
+        self,
+        d_model=512,
+        nhead=8,
+        dim_feedforward=2048,
+        dropout=0.1,
+        encoder_layers=6,
+        decoder_layers=6,
+        N=64,
+        tok_v=TOK_V,
+        rel_v=REL_V,
+        pos_v=POS_V,
+        name='test',
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    ):
+        super().__init__()
+        
+        self.N = N
+        self.d_model = d_model
+        self.name = name
+        self.device = device
+        self.rel_offset = tok_v
+        self.pos_offset = tok_v + rel_v
+        self.vocab_size = tok_v + rel_v + pos_v + 1 # add one for UNK
+        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
+        
+        codec_params = {
+            'd_model': d_model,
+            'dim_feedforward': dim_feedforward,
+            'nhead': nhead,
+            'dropout': dropout,
+            'batch_first': True
+        }
+       
+        encoder_layer = nn.TransformerEncoderLayer(**codec_params)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+        
+        decoder_layer = nn.TransformerDecoderLayer(**codec_params)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
+        
+        self.embedding = nn.Embedding(self.vocab_size, d_model)
+        self.positional_embedding = SinusoidalEmbedding(d_model, max_len=N)
+        
+        self.op_head = nn.Linear(d_model, 4)
+        self.cpy_head = nn.Linear(d_model, 512)
+        self.par_head = nn.Linear(d_model, 512)
+        self.v_head = nn.Linear(d_model, tok_v+rel_v+pos_v)
+       
+        self.done = nn.Parameter(torch.zeros(d_model))
+        self.plh = nn.Parameter(torch.zeros(d_model))
+        self.root_bos = nn.Parameter(torch.zeros(d_model))
+        self.root_eos = nn.Parameter(torch.zeros(d_model))
+        self.init_params()
+    
+    def init_params(self):
+        for param in [self.done, self.plh, self.root_bos, self.root_eos]:
+            nn.init.trunc_normal_(param, mean=0.0, std=1.0 / math.sqrt(self.d_model))
+        
+    def root(self, tok, rel, pos):
+        root = (self.embedding.weight[tok] + self.embedding.weight[rel] + self.embedding.weight[pos]).unsqueeze(0)
+        embeds = torch.cat([self.root_bos.unsqueeze(0), root, self.root_eos.unsqueeze(0)], dim=0)
+        embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0, device=self.device)])
+        return embeds.unsqueeze(0)
+    
+    def _replace(self, t, a, b):
+        return torch.where(t == a, b, t)
+    
+    def tgt_op(self, mem, tgt_op, tgt_cpy):
+        pass
+    
+    def forward_op(self, src, tgt_op, tgt_cpy, src_pad_mask, *_):
+        pass
+    
+    def tgt_par(self, mem, tgt_par):
+        pass
+    
+    def forward_par(self, src, tgt_par, _, src_pad_mask, tgt_pad_mask):
+        encoder_masks = {'src_key_padding_mask': src_pad_mask}
+        decoder_masks = {'tgt_mask': self.causal_mask, 'tgt_key_padding_mask': tgt_pad_mask, 'memory_key_padding_mask': src_pad_mask}
+        
+        mem = self.encoder(src, **encoder_masks)
+        tgt = self.tgt_par(mem, tgt_par)
+
+        h = self.decoder(tgt, mem, **decoder_masks)
+        l = self.par_head(h)
+        
+        # TODO -- constrain?
+        
+        return l, tgt
+    
+    def tgt_gen(self, mem, tgt_gen):
+        pass
+    
+    def forward_gen(self, src, tgt_gen, _, src_pad_mask, tgt_pad_mask):
+        pass
+    
+    def forward(
+        self, src, pad_masks,
+        tgt_op, tgt_cpy, tgt_par,
+        tgt_rel, tgt_pos, tgt_tok
+    ):
+        pass
+    
+    def _record(self, ls, step):
+        # prefix = 'train' if self.training else 'eval'
+        prefix = 'train'
+        log({
+            f'{prefix}/op': ls[0],
+            f'{prefix}/cpy': ls[1],
+            f'{prefix}/par': ls[2],
+            f'{prefix}/rel': ls[3],
+            f'{prefix}/pos': ls[4],
+            f'{prefix}/tok': ls[5]
+        }, step=step)
+   
+    def traj_loss(self, root, tgts, step=None):
+        pass
     
     def _save(self, step, optim):
         path = f'{REMOTE_PREFIX}/checkpoints' if self.device == 'cuda' else 'checkpoints'
@@ -291,7 +462,6 @@ class DependencyEvolver(nn.Module):
             if step >= eval_steps: break
             tgts = tgts.to(self.device)
             tot += self.traj_loss(root, tgts)
-            # n += tgts[0].shape[0] + torch.sum(tgts[0] != -1)
             n += torch.sum(tgts[-1, 0] != -1)
     
         return tot / n

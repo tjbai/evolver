@@ -349,6 +349,8 @@ def init_run(config, name, local):
         name=name
     )
     
+    model = model.to(model.device)
+    
     optim = AdamW(model.parameters(), lr=config['lr'])
     
     start_step = 0

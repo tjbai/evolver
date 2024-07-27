@@ -164,7 +164,9 @@ class DependencyEvolver(nn.Module):
         return l_op, l_cpy, tgt
     
     def tgt_par(self, mem, tgt_par):
-        B, _, _ = mem.shape 
+        B, N, _ = mem.shape 
+        
+        if torch.any(tgt_par >= N): raise Exception("tgt_par has illegal indices")
         
         permuted_mem = mem[
             torch.arange(B, device=mem.device).unsqueeze(1),

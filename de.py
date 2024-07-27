@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from model import SinusoidalEmbedding
+from data import StratifiedInfiniteSampler
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -64,9 +65,14 @@ def collate_single(sample):
 
 def single_loader(path, shuffle=True):
     dataset = ParseDataset.from_pkl(path) 
-    loader = DataLoader(dataset, batch_size=1, collate_fn=collate_single, shuffle=shuffle)
-    return loader
-
+    return DataLoader(
+        dataset,
+        batch_size=1,
+        sampler=StratifiedInfiniteSampler(dataset, 1),
+        collate_fn=collate_single,
+        shuffle=shuffle
+    )
+    
 class DependencyEvolver(nn.Module):
     
     def __init__(
@@ -113,8 +119,8 @@ class DependencyEvolver(nn.Module):
         self.positional_embedding = SinusoidalEmbedding(d_model, max_len=N)
         
         self.op_head = nn.Linear(d_model, 4)
-        self.cpy_head = nn.Linear(d_model, 512)
-        self.par_head = nn.Linear(d_model, 512)
+        self.cpy_head = nn.Linear(d_model, N)
+        self.par_head = nn.Linear(d_model, N)
         self.v_head = nn.Linear(d_model, tok_v+rel_v+pos_v)
        
         self.done = nn.Parameter(torch.zeros(d_model))
@@ -225,6 +231,36 @@ class DependencyEvolver(nn.Module):
         
         return l_op, l_cpy, l_par, l_rel, l_pos, l_tok
     
+    def generate(self, root, max_depth=5):
+        return
+        src = self.root(*root)
+        prev_len = 3
+        src_pad_mask = torch.full((1, self.N), True, device=self.device)
+        src_pad_mask[:, :3] = False
+        
+        for _ in range(max_depth):
+            
+            # go step by step, we create the new src_pad_mask after the first OP step
+            # making some strong assumptions that we don't have batch inference here
+            # this is also going to be humorously slow
+            
+            tgt_op = torch.full((1, self.N), -1)
+            tgt_op[:, 0] = CPY_ID
+            tgt_cpy = torch.full((1, self.N), -1)
+            for i in tqdm(range(1, self.N)):
+                if torch.all(tgt_op[:, i-1] == EOS_ID): break
+                l_op, l_cpy, src = self.forward_op(src, tgt_op, tgt_cpy, src_pad_mask, None, None)
+                probs_op = F.log_softmax(l_op[:, i-1], dim=-1)
+                probs_cpy = F.log_softmax(l_cpy[:, i-1, :prev_len], dim=-1)
+                op = torch.multinomial(torch.exp(probs_op), 1)
+                cpy = torch.multinomial(torch.exp(probs_cpy), 1)
+                tgt_op[:, i] = op.item()
+                tgt_cpy[:, i] = cpy.item()
+           
+            orphans = torch.sum(tgt_op == INS_ID)
+            print(f'Finding parents for {orphans} orphans')
+            tgt_par = torch.full()
+    
     def _record(self, ls, step):
         # prefix = 'train' if self.training else 'eval'
         prefix = 'train'
@@ -327,7 +363,7 @@ class DependencyEvolver(nn.Module):
                 loss = self._eval(eval_loader, eval_steps)
                 log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
                 
-class StaticDependencyEvolver(DependencyEvolver):
+class NoDecoderDependencyEvolver(DependencyEvolver):
     
     def __init__(
         self,
@@ -336,7 +372,6 @@ class StaticDependencyEvolver(DependencyEvolver):
         dim_feedforward=2048,
         dropout=0.1,
         encoder_layers=6,
-        decoder_layers=6,
         N=64,
         tok_v=TOK_V,
         rel_v=REL_V,

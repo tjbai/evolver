@@ -69,3 +69,12 @@ different embedding sizes:
 ## ud-2.*
 
 ran a brief experiment (sup-imdb-2.*) and results were pretty poor (probably unsurprisingly, "difficult")
+
+
+## brainstorm for simple dependency evolver
+
+IDEA: be more like levenshtein transformer
+
+idea to borrow #1:
+
+rather than predict target-side by "loosely associated" operations and indices, predict some number of placeholders to insert at each step

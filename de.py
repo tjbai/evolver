@@ -6,6 +6,7 @@ import pickle
 import logging
 import argparse
 from datetime import datetime
+from collections import defaultdict
 
 import wandb
 import torch
@@ -33,6 +34,18 @@ def log(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: print(f"step {step}: {data}")
     
+def save_model(model, step, optim):
+    path = f'{REMOTE_PREFIX}/checkpoints' if model.device == 'cuda' else 'checkpoints'
+    torch.save({
+        'step': step,
+        'model': model.state_dict(),
+        'optim': optim.state_dict(),
+        'wandb_run_id': None if wandb.run is None else wandb.run.id
+    }, f'{path}/{model.name}-{step+1}.pt')
+    
+def _replace(t, a, b):
+    return torch.where(t == a, b, t)
+
 class ParseDataset(Dataset):
     
     @classmethod
@@ -88,7 +101,8 @@ class DependencyEvolver(nn.Module):
         rel_v=REL_V,
         pos_v=POS_V,
         name='test',
-        device='cuda' if torch.cuda.is_available() else 'cpu'
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        *_
     ):
         super().__init__()
         
@@ -139,9 +153,6 @@ class DependencyEvolver(nn.Module):
         embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0, device=self.device)])
         return embeds.unsqueeze(0)
     
-    def _replace(self, t, a, b):
-        return torch.where(t == a, b, t)
-    
     def tgt_op(self, mem, tgt_op, tgt_cpy):
         B, N, _ = mem.shape
         
@@ -180,7 +191,7 @@ class DependencyEvolver(nn.Module):
         ]
         
         tgt = mem \
-            + torch.where((tgt_par > 0).unsqueeze(-1).expand_as(mem), permuted_mem, 0)
+            + torch.where(~tgt_par.eq(-1).unsqueeze(-1).expand_as(mem), permuted_mem, 0)
         
         return tgt
     
@@ -231,38 +242,7 @@ class DependencyEvolver(nn.Module):
         
         return l_op, l_cpy, l_par, l_rel, l_pos, l_tok
     
-    def generate(self, root, max_depth=5):
-        return
-        src = self.root(*root)
-        prev_len = 3
-        src_pad_mask = torch.full((1, self.N), True, device=self.device)
-        src_pad_mask[:, :3] = False
-        
-        for _ in range(max_depth):
-            
-            # go step by step, we create the new src_pad_mask after the first OP step
-            # making some strong assumptions that we don't have batch inference here
-            # this is also going to be humorously slow
-            
-            tgt_op = torch.full((1, self.N), -1)
-            tgt_op[:, 0] = CPY_ID
-            tgt_cpy = torch.full((1, self.N), -1)
-            for i in tqdm(range(1, self.N)):
-                if torch.all(tgt_op[:, i-1] == EOS_ID): break
-                l_op, l_cpy, src = self.forward_op(src, tgt_op, tgt_cpy, src_pad_mask, None, None)
-                probs_op = F.log_softmax(l_op[:, i-1], dim=-1)
-                probs_cpy = F.log_softmax(l_cpy[:, i-1, :prev_len], dim=-1)
-                op = torch.multinomial(torch.exp(probs_op), 1)
-                cpy = torch.multinomial(torch.exp(probs_cpy), 1)
-                tgt_op[:, i] = op.item()
-                tgt_cpy[:, i] = cpy.item()
-           
-            orphans = torch.sum(tgt_op == INS_ID)
-            print(f'Finding parents for {orphans} orphans')
-            tgt_par = torch.full()
-    
     def _record(self, ls, step):
-        # prefix = 'train' if self.training else 'eval'
         prefix = 'train'
         log({
             f'{prefix}/op': ls[0],
@@ -279,10 +259,6 @@ class DependencyEvolver(nn.Module):
         mask = t != ignore
         return -F.log_softmax(l[mask], dim=-1).gather(1, t[mask].unsqueeze(1))
    
-    '''
-    TODO -- write some documentation for when i inevitably forget how this works
-            lots of mental overhead with the way i handle pad masks, etc. here
-    ''' 
     def traj_loss(self, root, tgts, step=None, reduce=True):
         T, _, B, N = tgts.shape
         
@@ -312,15 +288,6 @@ class DependencyEvolver(nn.Module):
         if self.training: self._record(loss, step)
         return sum(loss) if reduce else sum(tot)
     
-    def _save(self, step, optim):
-        path = f'{REMOTE_PREFIX}/checkpoints' if self.device == 'cuda' else 'checkpoints'
-        torch.save({
-            'step': step,
-            'model': self.state_dict(),
-            'optim': optim.state_dict(),
-            'wandb_run_id': None if wandb.run is None else wandb.run.id
-        }, f'{path}/{self.name}-{step+1}.pt')
-        
     def _eval(self, eval_loader, eval_steps):
         self.eval()
       
@@ -356,14 +323,82 @@ class DependencyEvolver(nn.Module):
                 optim.zero_grad()
             
             if (step + 1) % checkpoint_at == 0:
-                self._save(step, optim)
+                save_model(self, step, optim)
                 
             if (step + 1) % eval_at == 0:
                 s = time.time()
                 loss = self._eval(eval_loader, eval_steps)
                 log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
-                
-class NoDecoderDependencyEvolver(DependencyEvolver):
+   
+    '''
+    def generate_op(self, src, src_pad_mask, prev_len):
+        tgt_op = torch.full((1, self.N), -1, device=self.device)
+        tgt_op[:, 0] = CPY_ID
+        tgt_cpy = torch.full((1, self.N), -1, device=self.device)
+        
+        for i in tqdm(range(1, self.N)):
+            if torch.all(tgt_op[:, i-1] == EOS_ID): break
+            l_op, l_cpy, src = self.forward_op(src, tgt_op, tgt_cpy, src_pad_mask, None, None)
+            probs_op = F.log_softmax(l_op[:, i-1], dim=-1)
+            probs_cpy = F.log_softmax(l_cpy[:, i-1, :prev_len], dim=-1)
+            op = torch.multinomial(torch.exp(probs_op), 1)
+            cpy = torch.multinomial(torch.exp(probs_cpy), 1)
+            tgt_op[:, i] = op.item()
+            tgt_cpy[:, i] = cpy.item()
+            
+        return src, tgt_op, tgt_cpy
+    
+    def generate_par(self, src, src_pad_mask, tgt_pad_mask, is_orphan):
+        tgt_par = torch.full((1, self.N), -1, device=self.device)
+        for i in tqdm(1, range(self.N)):
+            if not torch.all(is_orphan[:, i]): continue
+            l_par, src = self.forward_par(src, tgt_par, None, src_pad_mask, tgt_pad_mask)
+            probs_par = F.log_softmax(l_par[:, i-1], dim=-1)
+            par = torch.multinomial(torch.exp(probs_par), 1)
+            tgt_par[:, i] = par.item()
+            
+        return src, tgt_par
+    
+    def generate(self, root, max_depth=5):
+        src = self.root(*root)
+        prev_len = 3
+        src_pad_mask = torch.full((1, self.N), True, device=self.device)
+        src_pad_mask[:, :3] = False
+        
+        for _ in range(max_depth):
+            # this is going to be _very_ slow for now
+            src, tgt_op, tgt_cpy = self.generate_op(src, src_pad_mask, prev_len)
+           
+            src_pad_mask = tgt_op.eq(-1)
+            src_pad_mask[:, 0] = False
+            is_orphan = tgt_op.eq(INS_ID)
+            tgt_pad_mask = ~is_orphan
+            tgt_pad_mask[:, 0] = False
+            
+            src, tgt_par = self.generate_par(src, src_pad_mask, tgt_pad_mask, is_orphan)
+            
+            # TODO -- finish this
+    '''
+    
+class SimpleParseDataset(Dataset):
+    
+    @classmethod
+    def from_pkl(cls, path, *args, **kwargs):
+        with open(path, 'rb') as f:
+            samples = pickle.load(f)
+            return cls(samples, *args, **kwargs)
+        
+    def __init__(self, samples):
+        self.samples = samples
+        
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, i):
+        seq, traj = self.samples[i]
+        return seq, tuple(map(lambda x: torch.tensor(x), zip(*traj)))
+    
+class SimpleDependencyEvolver(nn.Module):
     
     def __init__(
         self,
@@ -373,22 +408,22 @@ class NoDecoderDependencyEvolver(DependencyEvolver):
         dropout=0.1,
         encoder_layers=6,
         N=64,
-        tok_v=TOK_V,
-        rel_v=REL_V,
-        pos_v=POS_V,
+        K=64,
+        tok_v=None,
+        pos_v=None,
+        rel_v=None,
         name='test',
-        device='cuda' if torch.cuda.is_available() else 'cpu'
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        **_
     ):
         super().__init__()
-        
+       
+        self.d_model = d_model 
+        self.dim_feedforward = dim_feedforward
         self.N = N
-        self.d_model = d_model
+        self.K = K
         self.name = name
         self.device = device
-        self.rel_offset = tok_v
-        self.pos_offset = tok_v + rel_v
-        self.vocab_size = tok_v + rel_v + pos_v + 1 # add one for UNK
-        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
         
         codec_params = {
             'd_model': d_model,
@@ -397,141 +432,274 @@ class NoDecoderDependencyEvolver(DependencyEvolver):
             'dropout': dropout,
             'batch_first': True
         }
-       
+        
         encoder_layer = nn.TransformerEncoderLayer(**codec_params)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
-        
-        decoder_layer = nn.TransformerDecoderLayer(**codec_params)
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
-        
-        self.embedding = nn.Embedding(self.vocab_size, d_model)
+       
+        self.load_vocab(tok_v, pos_v, rel_v)
+        self.tok_embedding = nn.Embedding(len(self.tok_v), d_model)
+        self.pos_embedding = nn.Embedding(len(self.pos_v), d_model)
+        self.rel_embedding = nn.Embedding(len(self.rel_v), d_model)
         self.positional_embedding = SinusoidalEmbedding(d_model, max_len=N)
         
-        self.op_head = nn.Linear(d_model, 4)
-        self.cpy_head = nn.Linear(d_model, 512)
-        self.par_head = nn.Linear(d_model, 512)
-        self.v_head = nn.Linear(d_model, tok_v+rel_v+pos_v)
-       
-        self.done = nn.Parameter(torch.zeros(d_model))
-        self.plh = nn.Parameter(torch.zeros(d_model))
-        self.root_bos = nn.Parameter(torch.zeros(d_model))
-        self.root_eos = nn.Parameter(torch.zeros(d_model))
+        self.ins_head = nn.Linear(2*d_model, K)
+        self.par_head = nn.Linear(d_model, N)
+        self.rel_head = nn.Linear(d_model, len(self.rel_v))
+        self.pos_head = nn.Linear(d_model, len(self.pos_v))
+        self.tok_head = nn.Linear(d_model, len(self.tok_v))
+        
+        self.encode_par = nn.Sequential(
+            nn.Linear(self.d_model, self.dim_feedforward),
+            nn.ReLU(),
+            nn.Linear(self.dim_feedforward, self.d_model)
+        )
+        
+        self.root_bos = nn.Parameter(torch.zeros(1, d_model))
+        self.root_eos = nn.Parameter(torch.zeros(1, d_model))
+        self.plh = nn.Parameter(torch.zeros(1, d_model))
         self.init_params()
-    
+            
     def init_params(self):
-        for param in [self.done, self.plh, self.root_bos, self.root_eos]:
+        for param in [self.root_bos, self.root_eos]:
             nn.init.trunc_normal_(param, mean=0.0, std=1.0 / math.sqrt(self.d_model))
         
-    def root(self, tok, rel, pos):
-        root = (self.embedding.weight[tok] + self.embedding.weight[rel] + self.embedding.weight[pos]).unsqueeze(0)
-        embeds = torch.cat([self.root_bos.unsqueeze(0), root, self.root_eos.unsqueeze(0)], dim=0)
-        embeds = torch.cat([embeds, torch.full((self.N-3, self.d_model), 0, device=self.device)])
-        return embeds.unsqueeze(0)
-    
-    def _replace(self, t, a, b):
-        return torch.where(t == a, b, t)
-    
-    def tgt_op(self, mem, tgt_op, tgt_cpy):
-        pass
-    
-    def forward_op(self, src, tgt_op, tgt_cpy, src_pad_mask, *_):
-        pass
-    
-    def tgt_par(self, mem, tgt_par):
-        pass
-    
-    def forward_par(self, src, tgt_par, _, src_pad_mask, tgt_pad_mask):
-        encoder_masks = {'src_key_padding_mask': src_pad_mask}
-        decoder_masks = {'tgt_mask': self.causal_mask, 'tgt_key_padding_mask': tgt_pad_mask, 'memory_key_padding_mask': src_pad_mask}
+    def load_vocab(self, tok_v, pos_v, rel_v):
+        with open(tok_v, 'r') as f: self.tok_v = {tok.strip(): i for i, tok in enumerate(f.readlines())}
+        with open(pos_v, 'r') as f: self.pos_v = {pos.strip(): i for i, pos in enumerate(f.readlines())}
+        with open(rel_v, 'r') as f: self.rel_v = {rel.strip(): i for i, rel in enumerate(f.readlines())}
         
-        mem = self.encoder(src, **encoder_masks)
-        tgt = self.tgt_par(mem, tgt_par)
+        self.detok = {v: k for k, v in self.tok_v.items()}
+        self.depos = {v: k for k, v in self.pos_v.items()}
+        self.derel = {v: k for k, v in self.rel_v.items()}
+        
+    def get_loader(self, path):
+        dataset = SimpleParseDataset.from_pkl(path)
+        return DataLoader(dataset, batch_size=1, sampler=StratifiedInfiniteSampler(dataset, 1))
+            
+    @property
+    def vocab_size(self):
+        return len(self.tok_v) + len(self.pos_v) + len(self.rel_v)
+ 
+    @staticmethod
+    def lbl_tree(parsed):
+        # return "level-by-level" representation of parse tree
+        
+        children = defaultdict(list)
+        for t in parsed:
+            if t['head'] is None: return None
+            if t['head'] != 0: children[t['head']].append(t['id'])
+           
+        seqs = []
+        inserted = set()
+        cur_leaves = [next(t for t in parsed if t['head'] == 0)['id']]
+        
+        while cur_leaves:
+            seq = []
+            next_leaves = []
+            
+            for t in parsed:
+                if t['id'] in cur_leaves or t['id'] in inserted:
+                    inserted.add(t['id'])
+                    seq.append(t)
+                    if t['id'] in cur_leaves: next_leaves.extend(children[t['id']])
+                    
+            seqs.append(seq)
+            cur_leaves = next_leaves
+            
+        return seqs
+   
+    def get_labels(self, input_tokens, output_tokens, pad=True):
+        if len(output_tokens) > self.N-2: return None
+        
+        # tokens are represented as a tuple of tokens
+        # we return a tuple of list[ins], list[par], list[rel], list[pos], list[tok]
+        tgt_ins, tgt_par, tgt_rel, tgt_pos, tgt_tok = [], [], [], [] , []
+        
+        seen = set(t['id'] for t in input_tokens)
+        idx = dict((t['id'], i+1) for i, t in enumerate(output_tokens))
+        
+        tgt_par = [-1] + [-1 if t['id'] in seen else idx[t['head']] for t in output_tokens] + [-1]
+        tgt_tok = [-1] + [-1 if t['id'] in seen else self.tok_v[t['form']] for t in output_tokens] + [-1]
+        tgt_pos = [-1] + [-1 if t['id'] in seen else self.pos_v[t['upos']] for t in output_tokens] + [-1]
+        tgt_rel = [-1] + [-1 if t['id'] in seen else self.rel_v[t['deprel']] for t in output_tokens] + [-1]
+        
+        tgt_ins = [idx[input_tokens[0]['id']]-1] \
+                + [idx[input_tokens[i+1]['id']]-idx[input_tokens[i]['id']]-1 for i in range(len(input_tokens)-1)] \
+                + [len(output_tokens)-idx[input_tokens[-1]['id']]]
+                
+        if pad:
+            tgt_par.extend(-1 for _ in range(self.N-len(tgt_par)))
+            tgt_tok.extend(-1 for _ in range(self.N-len(tgt_tok)))
+            tgt_pos.extend(-1 for _ in range(self.N-len(tgt_pos)))
+            tgt_rel.extend(-1 for _ in range(self.N-len(tgt_rel)))
+            tgt_ins.extend(0 for _ in range(self.N-len(tgt_ins)-1))
+        
+        return tgt_ins, tgt_par, tgt_rel, tgt_pos, tgt_tok
+    
+    def tokenize(self, input_tokens):
+        return [(self.tok_v[t['form']], self.pos_v[t['upos']], self.rel_v[t['deprel']]) for t in input_tokens]
+    
+    def detokenize(self, input_tokens):
+        return [(self.detok[a], self.depos[b], self.derel[c]) for (a, b, c) in input_tokens]
+                
+    def embed(self, input_tokens, pad=True):
+        tok, pos, rel = tuple(map(
+            lambda x: torch.tensor(x, device=self.device, dtype=torch.long),
+            list(zip(*input_tokens))
+        ))
+        
+        assert tok.shape == pos.shape == rel.shape
+        seq_embed = self.tok_embedding(tok) + self.pos_embedding(pos) + self.rel_embedding(rel)
+        root = torch.cat([self.root_bos, seq_embed, self.root_eos], dim=0)
+        if pad: root = torch.cat([root, torch.full((self.N-root.shape[0], self.d_model), 0, device=self.device)], dim=0)
+        return root.unsqueeze(0)
+    
+    def _ins(self, src, src_pad_mask):
+        h = self.encoder(src, src_key_padding_mask=src_pad_mask)
+        h_cat = torch.cat([h[:, :-1], h[:, 1:]], dim=-1)
+        l = self.ins_head(h_cat)
+        return h, l
+    
+    def _next_pad_mask(self, cpy_indices):
+        max_non_pad = torch.max(cpy_indices, dim=-1).values.unsqueeze(1)
+        return torch.arange(self.N, device=self.device).unsqueeze(0) > max_non_pad
 
-        h = self.decoder(tgt, mem, **decoder_masks)
+    def _ins_plh(self, h, src_pad_mask, ins_count):
+        B, N, _ = h.shape
+        assert ins_count.shape == (B, N-1)
+        
+        res = torch.zeros_like(h, device=self.device)
+        h = self.positional_embedding(h, d=-1)
+        
+        cumsum = torch.cat([torch.zeros(B, 1, device=self.device), torch.cumsum(ins_count, dim=1)], dim=1)
+        cpy_indices = torch.where(src_pad_mask, 0, torch.arange(N, device=self.device).unsqueeze(0) + cumsum)
+        if torch.any(cpy_indices[src_pad_mask] >= N): raise Exception('insertion would cause sequence overflow')
+        res.scatter_(1, cpy_indices.long().unsqueeze(-1).expand_as(h), h)
+         
+        plh_mask = torch.ones((B, N), device=self.device, dtype=torch.bool)
+        plh_mask.scatter_(1, cpy_indices.long(), False)
+        res[plh_mask] = self.plh
+        
+        res = self.positional_embedding(res, d=1)
+        return res, self._next_pad_mask(cpy_indices)
+   
+    def _par(self, src, src_pad_mask):
+        h = self.encoder(src, src_key_padding_mask=src_pad_mask)
         l = self.par_head(h)
-        
-        # TODO -- constrain?
-        
-        return l, tgt
+        return l
     
-    def tgt_gen(self, mem, tgt_gen):
-        pass
+    def _add_par(self, h, par_idx):
+        par = self.encode_par(h)
+        h = h + torch.where((par_idx != -1).unsqueeze(-1).expand_as(h), par, 0)
+        return h
     
-    def forward_gen(self, src, tgt_gen, _, src_pad_mask, tgt_pad_mask):
-        pass
+    def _add_embeds(self, h, embeds):
+        return h + self.embedding(_replace(embeds, -1, 0))
     
     def forward(
-        self, src, pad_masks,
-        tgt_op, tgt_cpy, tgt_par,
+        self, src, src_pad_mask,
+        tgt_ins, tgt_par,
         tgt_rel, tgt_pos, tgt_tok
     ):
-        pass
-    
-    def _record(self, ls, step):
-        # prefix = 'train' if self.training else 'eval'
-        prefix = 'train'
-        log({
-            f'{prefix}/op': ls[0],
-            f'{prefix}/cpy': ls[1],
-            f'{prefix}/par': ls[2],
-            f'{prefix}/rel': ls[3],
-            f'{prefix}/pos': ls[4],
-            f'{prefix}/tok': ls[5]
-        }, step=step)
-   
-    def traj_loss(self, root, tgts, step=None):
-        pass
-    
-    def _save(self, step, optim):
-        path = f'{REMOTE_PREFIX}/checkpoints' if self.device == 'cuda' else 'checkpoints'
-        torch.save({
-            'step': step,
-            'model': self.state_dict(),
-            'optim': optim.state_dict(),
-            'wandb_run_id': None if wandb.run is None else wandb.run.id
-        }, f'{path}/{self.name}-{step+1}.pt')
+        h, l_ins = self._ins(src, src_pad_mask)
+        h, src_pad_mask = self._ins_plh(h, src_pad_mask, tgt_ins)
         
-    def _eval(self, eval_loader, eval_steps):
-        self.eval()
-      
-        tot = n = 0
-        for step, (root, tgts) in enumerate(eval_loader):
-            if step >= eval_steps: break
-            tgts = tgts.to(self.device)
-            tot += self.traj_loss(root, tgts)
-            n += torch.sum(tgts[-1, 0] != -1)
-    
-        return tot / n
-    
+        l_par = self._par(h, src_pad_mask)
+        h = self._add_par(h, tgt_par)
+        
+        l_rel = self.rel_head(h)
+        h = h + self.rel_embedding(_replace(tgt_rel, -1, 0))
+        
+        l_pos = self.pos_head(h)
+        h = h + self.pos_embedding(_replace(tgt_pos, -1, 0))
+        
+        l_tok = self.tok_head(h)
+        h = h + self.tok_embedding(_replace(tgt_tok, -1, 0))
+        
+        return (l_ins, l_par, l_rel, l_pos, l_tok), h, src_pad_mask
+ 
+    def step(self, seq, traj, step=None, reduce=True):
+        B, T, N = traj[1].shape
+        
+        tot = [0 for _ in range(6)]
+        num = [0 for _ in range(6)]
+        
+        src = self.embed(seq[0])
+        src_pad_mask = torch.full((B, N), True, device=self.device)
+        src_pad_mask[:, :3] = False
+        
+        for i in range(T):
+            ls, src, src_pad_mask = self.forward(
+                src, src_pad_mask,
+                *map(lambda x: x[:, i], traj)
+            )
+            
+            for j, (l, t) in enumerate(zip(ls, traj)):
+                loss = self._xent(l, t[:, i])
+                tot[j] += torch.sum(loss)
+                num[j] += torch.numel(loss)
+                
+        loss = [(t/n if n > 0 else 0) for t, n in zip(tot, num)]
+        if self.training: self._record(loss, step)
+        return sum(loss) if reduce else sum(tot)
+            
     def _train(
         self, optim, train_loader, eval_loader,
         train_steps, eval_steps, grad_accum_steps,
-        checkpoint_at, eval_at,
-        start_step=0
+        checkpoint_at, eval_at, start_step=0
     ):
-        for step, (root, tgts) in tqdm(
+        for step, (seq, traj) in tqdm(
             enumerate(train_loader, start=start_step),
             total=train_steps
         ):
             if step >= train_steps: break
-            tgts = tgts.to(self.device)
+            traj = tuple(map(lambda x: x.to(self.device), traj))
             
             self.train()
-            loss = self.traj_loss(root, tgts, step=step)
+            loss = self.step(seq, traj, step=step)
             log({'train/loss': loss}, step=step)
-            
+
             loss.backward()
             if step % grad_accum_steps == 0:
-                optim.step()
+                optim.step()            
                 optim.zero_grad()
-            
-            if (step + 1) % checkpoint_at == 0:
-                self._save(step, optim)
                 
+            if (step + 1) % checkpoint_at:
+                save_model(self, step, optim)
+            
             if (step + 1) % eval_at == 0:
                 s = time.time()
-                loss = self._eval(eval_loader, eval_steps)
+                loss = self._eval(eval_loader, eval_steps) 
                 log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
+    
+    def _eval(self, eval_loader, eval_steps):
+        self.eval()
+        
+        tot = n = 0
+        with torch.no_grad():
+            for step, (seq, traj) in enumerate(eval_loader):
+                if step >= eval_steps: break
+                traj = tuple(map(lambda x: x.to(self.device), traj))
+                traj_ins, *_ = traj
+                tot += self.step(seq, traj, reduce=False)
+                # second to last seq length + everything we insert in the last step
+                n += len(seq[-1]) + torch.sum(traj_ins[:, -1])
+            
+        return tot / n
+        
+    def _xent(self, l, t, ignore=-1):
+        mask = t != ignore
+        return -F.log_softmax(l[mask], dim=-1).gather(1, t[mask].unsqueeze(1))
+
+    def _record(self, ls, step):
+        prefix = 'train'
+        log({
+            f'{prefix}/ins': ls[0],
+            f'{prefix}/par': ls[1],
+            f'{prefix}/rel': ls[3],
+            f'{prefix}/pos': ls[4],
+            f'{prefix}/tok': ls[5]
+        }, step=step)
                 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -540,22 +708,19 @@ def parse_args():
     return parser.parse_args()
 
 def init_run(config, name, local):
-    
-    with open(config['tok_v'], 'r') as f: tok_v = len(f.readlines())
-    with open(config['pos_v'], 'r') as f: pos_v = len(f.readlines())
-    with open(config['rel_v'], 'r') as f: rel_v = len(f.readlines())
-    
-    model = DependencyEvolver(
+    Model = (SimpleDependencyEvolver if name.startswith('simple') else DependencyEvolver)
+    model = Model(
         d_model=config['d_model'],
         nhead=config['nhead'],
         dim_feedforward=config['dim_feedforward'],
         dropout=config['dropout'],
         encoder_layers=config['encoder_layers'],
-        decoder_layers=config['decoder_layers'],
+        decoder_layers=config.get('decoder_layers', 0),
         N=config['N'],
-        tok_v=tok_v,
-        rel_v=rel_v,
-        pos_v=pos_v,
+        K=config.get('K', 0),
+        tok_v=config['tok_v'],
+        pos_v=config['pos_v'],
+        rel_v=config['rel_v'],
         name=name
     ).to('cuda' if torch.cuda.is_available() else 'cpu')
     

@@ -133,14 +133,13 @@ class DependencyEvolver(nn.Module):
         self.root_eos = nn.Parameter(torch.zeros(d_model))
         self.init_params()
         
-    def get_loader(self, path, shuffle=True):
+    def get_loader(self, path):
         dataset = ParseDataset.from_pkl(path) 
         return DataLoader(
             dataset,
             batch_size=1,
             sampler=StratifiedInfiniteSampler(dataset, 1),
             collate_fn=collate_single,
-            shuffle=shuffle
         )
     
     def init_params(self):

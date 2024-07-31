@@ -1,0 +1,22 @@
+{
+    "train": "data/gum/mini_1.pkl",
+    "eval": "data/gum/mini_1.pkl",
+    "tok_v": "vocab/gum_tok.vocab",
+    "rel_v": "vocab/rel.vocab",
+    "pos_v": "vocab/pos.vocab",
+
+    "d_model": 512,
+    "nhead": 8,
+    "dim_feedforward": 2048,
+    "dropout": 0,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+    "N": 64,
+    "lr": 3e-4,
+
+    "train_steps": 10000,
+    "eval_steps": 100,
+    "grad_accum_steps": 16,
+    "checkpoint_at": 10000,
+    "eval_at": 100
+}

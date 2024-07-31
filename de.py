@@ -625,8 +625,8 @@ class SimpleDependencyEvolver(nn.Module):
     def step(self, seq, traj, step=None, reduce=True):
         B, T, N = traj[1].shape
         
-        tot = [0 for _ in range(6)]
-        num = [0 for _ in range(6)]
+        tot = [0 for _ in range(5)]
+        num = [0 for _ in range(5)]
         
         src = self.embed(seq[0])
         src_pad_mask = torch.full((B, N), True, device=self.device)
@@ -700,9 +700,9 @@ class SimpleDependencyEvolver(nn.Module):
         log({
             f'{prefix}/ins': ls[0],
             f'{prefix}/par': ls[1],
-            f'{prefix}/rel': ls[3],
-            f'{prefix}/pos': ls[4],
-            f'{prefix}/tok': ls[5]
+            f'{prefix}/rel': ls[2],
+            f'{prefix}/pos': ls[3],
+            f'{prefix}/tok': ls[4]
         }, step=step)
                 
 def parse_args():

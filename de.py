@@ -76,16 +76,6 @@ def collate_single(sample):
                 
     return root, tgts
 
-def single_loader(path, shuffle=True):
-    dataset = ParseDataset.from_pkl(path) 
-    return DataLoader(
-        dataset,
-        batch_size=1,
-        sampler=StratifiedInfiniteSampler(dataset, 1),
-        collate_fn=collate_single,
-        shuffle=shuffle
-    )
-    
 class DependencyEvolver(nn.Module):
     
     def __init__(
@@ -142,6 +132,16 @@ class DependencyEvolver(nn.Module):
         self.root_bos = nn.Parameter(torch.zeros(d_model))
         self.root_eos = nn.Parameter(torch.zeros(d_model))
         self.init_params()
+        
+    def get_loader(self, path, shuffle=True):
+        dataset = ParseDataset.from_pkl(path) 
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            sampler=StratifiedInfiniteSampler(dataset, 1),
+            collate_fn=collate_single,
+            shuffle=shuffle
+        )
     
     def init_params(self):
         for param in [self.done, self.plh, self.root_bos, self.root_eos]:
@@ -330,7 +330,8 @@ class DependencyEvolver(nn.Module):
                 loss = self._eval(eval_loader, eval_steps)
                 log({'eval/loss': loss, 'eval/time': time.time()-s}, step=step)
    
-    '''
+    ### incomplete inference utilities
+    
     def generate_op(self, src, src_pad_mask, prev_len):
         tgt_op = torch.full((1, self.N), -1, device=self.device)
         tgt_op[:, 0] = CPY_ID
@@ -378,7 +379,6 @@ class DependencyEvolver(nn.Module):
             src, tgt_par = self.generate_par(src, src_pad_mask, tgt_pad_mask, is_orphan)
             
             # TODO -- finish this
-    '''
     
 class SimpleParseDataset(Dataset):
     
@@ -474,7 +474,12 @@ class SimpleDependencyEvolver(nn.Module):
         
     def get_loader(self, path):
         dataset = SimpleParseDataset.from_pkl(path)
-        return DataLoader(dataset, batch_size=1, sampler=StratifiedInfiniteSampler(dataset, 1))
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            sampler=StratifiedInfiniteSampler(dataset, 1),
+            pin_memory=True
+        )
             
     @property
     def vocab_size(self):
@@ -705,9 +710,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config')
     parser.add_argument('--local', action='store_true')
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     return parser.parse_args()
 
-def init_run(config, name, local):
+def init_run(config, name, local, device):
     Model = (SimpleDependencyEvolver if name.startswith('simple') else DependencyEvolver)
     model = Model(
         d_model=config['d_model'],
@@ -721,8 +727,12 @@ def init_run(config, name, local):
         tok_v=config['tok_v'],
         pos_v=config['pos_v'],
         rel_v=config['rel_v'],
-        name=name
-    ).to('cuda' if torch.cuda.is_available() else 'cpu')
+        name=name,
+        device=device
+    ).to(device)
+   
+    # enables cpu as fallback for nested tensors in inference
+    if device == 'mps': os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = str(1)
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     
@@ -741,7 +751,7 @@ def init_run(config, name, local):
 
     if wandb_run_id is None:
         wandb_run_id = wandb.util.generate_id()
-        logger.info('starting new run')
+        logger.info(f'starting new run: {name}')
     
     if not local:
         wandb.init(
@@ -769,9 +779,9 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f'{prefix}_{timestamp}'
     
-    model, optim, start_step = init_run(config, name, args.local)
-    train_loader = single_loader(config['train'])
-    eval_loader = single_loader(config['eval'])
+    model, optim, start_step = init_run(config, name, args.local, args.device)
+    train_loader = model.get_loader(config['train'])
+    eval_loader = model.get_loader(config['eval'])
     
     model._train(
         optim=optim,

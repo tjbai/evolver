@@ -668,7 +668,7 @@ class SimpleDependencyEvolver(nn.Module):
                 optim.step()            
                 optim.zero_grad()
                 
-            if (step + 1) % checkpoint_at:
+            if (step + 1) % checkpoint_at == 0:
                 save_model(self, step, optim)
             
             if (step + 1) % eval_at == 0:
@@ -714,6 +714,7 @@ def parse_args():
 
 def init_run(config, name, local, device):
     Model = (SimpleDependencyEvolver if name.startswith('simple') else DependencyEvolver)
+    logger.info(f'starting run with model: {Model}')
     model = Model(
         d_model=config['d_model'],
         nhead=config['nhead'],

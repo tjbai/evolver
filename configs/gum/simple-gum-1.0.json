@@ -1,6 +1,8 @@
 {
-    "train": "data/gum/train_2.pkl",
-    "eval": "data/gum/dev_2.pkl",
+    "notes": "grad accum now",
+
+    "train": "data/gum/mini_2.pkl",
+    "eval": "data/gum/mini_2.pkl",
     "tok_v": "vocab/gum_tok.vocab",
     "rel_v": "vocab/rel.vocab",
     "pos_v": "vocab/pos.vocab",
@@ -14,9 +16,9 @@
     "K": 16,
     "lr": 3e-4,
 
-    "train_steps": 1000,
+    "train_steps": 15000,
     "eval_steps": 50,
-    "grad_accum_steps": 1,
-    "checkpoint_at": 1000,
-    "eval_at": 100
+    "grad_accum_steps": 8,
+    "checkpoint_at": 15000,
+    "eval_at": 150
 }

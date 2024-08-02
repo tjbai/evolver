@@ -1,5 +1,4 @@
 checkpoints
-example.ipynb
 .DS_Store
 **.env
 __pycache__
@@ -7,6 +6,6 @@ __pycache__
 **.out
 wandb
 *_CHECKPOINT
-media
 **.pt
 **/cache
+lightning_logs

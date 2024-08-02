@@ -6,23 +6,30 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pytorch_lightning as pl
+import wandb
 from torch.nn import Transformer as T
 from torch.optim import AdamW
-import pytorch_lightning as pl
+from torch.utils.data import DataLoader
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-import wandb
+from transformers import BertTokenizer
 
-from const import VOCAB_SIZE
-from evo import SinusoidalEmbedding
-from transformer import (
-    TransformerEncoder, TransformerEncoderLayer,
-    TransformerDecoder, TransformerDecoderLayer
-)
+from const import VOCAB_SIZE, PAD_TOKEN_ID
+from utils import get_name, replace
+from embed import SinusoidalEmbedding
+from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
+from transformer import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 
+class PGNEvolver(pl.LightningModule):
+    # PGN but with dynamic evolver-style embeddings
+    
+    pass
+
 class PointerGenerator(pl.LightningModule):
+    
     def __init__(
         self,
         d_model=512,
@@ -34,14 +41,15 @@ class PointerGenerator(pl.LightningModule):
         decoder_layers=6,
         N=512,
         vocab_size=VOCAB_SIZE,
-        pad_token_id=-1,
+        pad_token_id=PAD_TOKEN_ID,
         tie_weights=False,
         name='test'
     ):
         super().__init__()
-        
+
         self.d_model = d_model
         self.N = N
+        self.vocab_size = vocab_size
         self.name = name
         self.pad_token_id = pad_token_id
         
@@ -67,9 +75,19 @@ class PointerGenerator(pl.LightningModule):
         
         self.save_hyperparameters()
         
+    def _train_loader(self, train_path, tokenizer, batch_size):
+        dataset = SequenceDataset.from_trajectories(path=train_path, max_len=self.N, tokenizer=tokenizer, denoising=True)
+        loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size))
+        return loader
+        
+    def _eval_loader(self, eval_path, tokenizer, batch_size):
+        dataset = TrajectoryDataset.from_disk(eval_path, max_len=self.N, tokenizer=tokenizer)
+        loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_unsupervised)
+        return loader
+        
     def _embed(self, ids):
         pad_mask = ids.eq(self.pad_token_id)
-        x = self.embedding(x) * math.sqrt(self.d_model)
+        x = self.embedding(ids) * math.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x, pad_mask
     
@@ -78,11 +96,16 @@ class PointerGenerator(pl.LightningModule):
         # mem: (B, N_in, D)
         # input_tgt: (B, N_out, D)
         # output_tgt: (B, N_out, D)
-       
         # from Bafna et al. (2024), p_ins = σ(W[c;i;o] + B)
         c = torch.bmm(attn_weights, mem)
-        p = F.sigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1))) 
+        p = F.sigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1)))
         return torch.clamp(p, 1e-9, 1-1e-9)
+    
+    def _aggregate_dist(self, weights, ids):
+        # ids: (B, N_ins)
+        # weights: (B, N_out, N_ins)
+        ids = F.one_hot(replace(ids, self.pad_token_id, 0).long(), num_classes=self.vocab_size).float()
+        return torch.log(torch.bmm(weights, ids))
 
     def forward(self, input_ids, output_ids):
         src, src_pad_mask = self._embed(input_ids)
@@ -92,9 +115,9 @@ class PointerGenerator(pl.LightningModule):
         h, (*_, attn_weights) = self.decoder(tgt, mem, memory_key_padding_mask=src_pad_mask, tgt_mask=self.causal_mask, tgt_key_padding_mask=tgt_pad_mask)
        
         ins_logits = F.log_softmax(self.tok_head(h), dim=-1)
-        cpy_logits = torch.log(attn_weights)
+        cpy_logits = self._aggregate_dist(attn_weights, input_ids)
         
-        p_ins = self._compute_p_ins()
+        p_ins = self._compute_p_ins(attn_weights, mem, tgt, h)
         ins_dist = torch.log(p_ins) + ins_logits
         cpy_dist = torch.log(1 - p_ins) + cpy_logits
         return torch.logsumexp(torch.stack([ins_dist, cpy_dist], dim=-1), dim=-1)
@@ -109,8 +132,8 @@ class PointerGenerator(pl.LightningModule):
         self.log('train/epoch_ppl', torch.exp(loss), on_step=False, on_epoch=True, prog_bar=True, logger=True)
     
     def _nll_loss(self, logits, output_ids):
-        logits = logits[:, :-1].view(-1, self.vocab_size)
-        output_ids = output_ids[:, 1:].view(-1)
+        logits = logits[:, :-1].reshape(-1, self.vocab_size)
+        output_ids = output_ids[:, 1:].reshape(-1)
         loss = F.nll_loss(logits, output_ids, ignore_index=self.pad_token_id, reduction='sum')
         toks = torch.sum(output_ids != self.pad_token_id)
         return loss, toks
@@ -118,7 +141,7 @@ class PointerGenerator(pl.LightningModule):
     def training_step(self, batch, _):
         input_ids, output_ids = batch
         logits = self.forward(input_ids, output_ids)
-        loss, toks = self._nll_loss(self, logits, output_ids)
+        loss, toks = self._nll_loss(logits, output_ids)
         self.train_loss += loss
         self.train_toks += toks
         self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
@@ -139,11 +162,10 @@ class PointerGenerator(pl.LightningModule):
         self.log('eval/elbo', elbo, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
     def validation_step(self, batch, _):
-        # traj_input_ids: (B, T, N)
-        # traj_likelihhood: (B,)
-        traj_input_ids, traj_likelihood = batch
+        traj_input_ids, traj_likelihood, *_ = batch
         
-        for i in range(T-1):
+        traj_toks = []
+        for i in range(traj_input_ids.shape[1]-1):
             input_ids = traj_input_ids[:, i]
             output_ids = traj_input_ids[:, i+1]
             logits = self.forward(input_ids, output_ids)
@@ -151,10 +173,11 @@ class PointerGenerator(pl.LightningModule):
             
             assert loss >= 0
             self.eval_loss += loss
-            self.eval_toks += toks
             self.eval_elbo_loss -= loss
-            self.eval_elbo_toks += toks if i == T-2 else 0
-            
+            traj_toks.append(toks)
+        
+        self.eval_toks += sum(traj_toks)
+        self.eval_elbo_toks += traj_toks[-1]
         self.eval_elbo_loss -= torch.sum(traj_likelihood)
 
     def configure_optimizers(self):
@@ -164,8 +187,9 @@ class PointerGenerator(pl.LightningModule):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config')
-    parser.add_argument('--local')
+    parser.add_argument('--local', action='store_true')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    return parser.parse_args()
     
 def main():
     args = parse_args()
@@ -175,15 +199,41 @@ def main():
     if not args.local:
         wandb.init(project='evolver', config=config)
         logger = WandbLogger(project='evolver')
+       
+    name = get_name(args.config) 
         
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f'{REMOTE_PREFIX if args.device=="cuda" else "."}/checkpoints'
-        filename=f'pgn-{{epoch:02d}}-{{val_loss:.2f}}',
+        dirpath=f'{REMOTE_PREFIX if args.device=="cuda" else "."}/checkpoints',
+        filename=name+'-{epoch:02d}',
         save_top_k=3,
-        monitor='val_loss',
-        mode='min'
+        monitor='eval/elbo',
+        mode='max'
     )
-        
+    
+    model = PointerGenerator(
+        d_model=config['d_model'],
+        dim_feedforward=config['dim_feedforward'],
+        nhead=config['nhead'],
+        dropout=config['dropout'],
+        encoder_layers=config['encoder_layers'],
+        N=config['N'],
+        name=name
+    )
+    
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    train_loader = model._train_loader(config['train'], tokenizer, config['batch_size'])
+    eval_loader = model._eval_loader(config['eval'], tokenizer, config['batch_size'])
+    
+    trainer = pl.Trainer(
+        max_steps=config['train_steps'],
+        val_check_interval=config['eval_at'],
+        accumulate_grad_batches=config['grad_accum_steps'],
+        callbacks=[checkpoint_callback],
+        accelerator=args.device,
+        logger=logger,
+    )
+    
+    trainer.fit(model, train_loader, eval_loader)
     
 if __name__ == '__main__':
     main()

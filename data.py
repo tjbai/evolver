@@ -101,7 +101,7 @@ class TrajectoryDataset(Dataset):
         return cls(traj_list, log_probs, **kwargs)
 
     def __init__(self, traj_list, log_probs, max_len, tokenizer, limit=None):
-        self.traj_input_ids = [get_input_ids(t, max_len, tokenizer) for t in tqdm(traj_list)]
+        self.traj_input_ids = [get_input_ids(t, max_len, tokenizer) for t in tqdm(traj_list, desc='tokenizing trajectories')]
         self.log_probs = log_probs
         self.limit = len(self.traj_input_ids) if limit is None else limit
         self.max_len = max_len
@@ -190,9 +190,8 @@ class SequenceDataset(Dataset):
     def __init__(self, inputs, outputs, max_len, tokenizer, limit=None):
         assert len(inputs) == len(outputs), 'length mismatch'
        
-        # TODO -- this can take a while and eventually might not fit in memory
         s = time.time()
-        logger.info('tokenizing input/output pairs...')
+        logger.info('tokenizing seq2seq pairs')
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
         logger.info(f'done in {time.time() - s:.2f} seconds!')

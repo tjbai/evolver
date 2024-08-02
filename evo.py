@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from const import *
 from run import sample_trajectory
+from utils import parse_model_id, get_name
 from embed import (
     SinusoidalEmbedding,
     LearnedEmbedding,
@@ -614,11 +615,6 @@ def parse_args():
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
-def parse_model_id(s):
-    _, name = os.path.split(s)
-    id = '.'.join(name.split('.')[:-1]) or name
-    return id
-
 def init_run(prefix, name, device, local, config):
     
     # NOTE -- this is not the same as encoder_layers and decoder_layers
@@ -698,12 +694,11 @@ def main():
     with open(args.config, 'r') as f: config = json.load(f)
     
     prefix = parse_model_id(args.config)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f'{prefix}_{timestamp}'
+    name = get_name(args.config)
     
-    model, optim, lr_scheduler, start_step = init_run(prefix, name, args.device, args.local, config)
+    model, optim, lr_scheduler, start_step = init_run(prefix, name, args.device, args.local, args.config)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-       
+    
     # autoregressive seq2seq 
     if prefix.startswith('ar-d'):
         train_dataset = SequenceDataset.from_trajectories(

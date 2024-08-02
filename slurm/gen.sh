@@ -1,11 +1,12 @@
 #!/bin/bash
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "Usage: $0 <config_path> [-r]"
+if [ $# -lt 1 ] || [ $# -gt 3 ]; then
+    echo "Usage: $0 <config_path> <model_file> [-r]"
     exit 1
 fi
 
 config_path="$1"
+model_file="$2"
 job_name=$(basename "$config_path" .json)
 
 cat << EOF > "slurm/${job_name}.sh"
@@ -21,11 +22,11 @@ cat << EOF > "slurm/${job_name}.sh"
 
 ml anaconda
 conda activate evo
-python3 evo.py --config $config_path --device cuda
+python3 $model_file --config $config_path --device cuda
 EOF
 
 echo "generated: ${job_name}.sh"
 
-if [ "$2" = "-r" ]; then
+if [ "$3" = "-r" ]; then
     sbatch "slurm/${job_name}.sh"
 fi

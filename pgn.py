@@ -15,7 +15,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from transformers import BertTokenizer
 
-from const import VOCAB_SIZE, PAD_TOKEN_ID
+from const import VOCAB_SIZE, PAD_TOKEN_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID
 from utils import get_name, replace
 from embed import SinusoidalEmbedding
 from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
@@ -106,7 +106,7 @@ class PointerGenerator(pl.LightningModule):
         
         mem = self.encoder(src, src_key_padding_mask=src_pad_mask)
         
-        causal_mask = T.generate_square_subsequent_mask(output_ids.shape[1], dtype=torch.bool)
+        causal_mask = T.generate_square_subsequent_mask(output_ids.shape[1], dtype=torch.bool, device=tgt.device)
         h, (*_, attn_weights) = self.decoder(tgt, mem, memory_key_padding_mask=src_pad_mask, tgt_mask=causal_mask, tgt_key_padding_mask=tgt_pad_mask)
        
         ins_logits = F.log_softmax(self.tok_head(h), dim=-1)
@@ -187,9 +187,28 @@ class PointerGeneratorEvolver(pl.LightningModule):
     def forward(self, traj_input_ids):
         pass
     
+    def _apply_edits(self, op_tgts, idx_tgts, mem):
+        # op_tgts: (B, N)
+        # mem: (B, N, D)
+        
+        mem = self.positional_embedding(mem, d=-1)
+        
+        B, N = op_tgts.shape
+        permuted_mem = mem[torch.arange(B).unsqueeze(1), ]
+        
+        # return (B, N, D)
+        
+        return None
+    
     def training_step(self, batch, _):
-        traj_input_ids, _, (), _ = batch
-
+        traj_input_ids, _, (op_tgts, _, idx_tgts), _ = batch
+        
+        # NOTE -- quirk because we're reusing labelhttps://www.clsp.jhu.edu/workshops/s
+        op_tgts = torch.argmax(op_tgts, dim=-1)
+        op_tgts = replace(op_tgts, SUB_ID, INS_ID)
+        op_tgts = replace(op_tgts, EOS_ID, CPY_ID)
+        idx_tgts = torch.argmax(idx_tgts, dim=-1)
+        
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config')

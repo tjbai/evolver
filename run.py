@@ -12,9 +12,7 @@ from data import (
     pad_traj_edit_tgts
 )
 
-from dep import noise
-
-from constants import (
+from const import (
     BOS_TOKEN_ID, PAD_TOKEN_ID, EOS_TOKEN_ID,
     PAD_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID,
     VOCAB_SIZE

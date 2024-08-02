@@ -17,22 +17,20 @@ from torch.nn import Transformer as T
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-from model import SinusoidalEmbedding
+from embed import SinusoidalEmbedding
 from data import StratifiedInfiniteSampler
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# TODO -- these default come from gum
-TOK_V, REL_V, POS_V = 19030, 69, 17
 INS_ID, CPY_ID, PRO_ID, EOS_ID = 0, 1, 2, 3
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 
 def log(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
-    else: print(f"step {step}: {data}")
+    else: logger.info(f"step {step}: {data}")
     
 def save_model(model, step, optim):
     path = f'{REMOTE_PREFIX}/checkpoints' if model.device == 'cuda' else 'checkpoints'
@@ -87,9 +85,9 @@ class DependencyEvolver(nn.Module):
         encoder_layers=6,
         decoder_layers=6,
         N=64,
-        tok_v=TOK_V,
-        rel_v=REL_V,
-        pos_v=POS_V,
+        tok_v=None,
+        rel_v=None,
+        pos_v=None,
         name='test',
         device='cuda' if torch.cuda.is_available() else 'cpu',
         *_
@@ -688,7 +686,7 @@ class SimpleDependencyEvolver(nn.Module):
                 tot += self.step(seq, traj, reduce=False)
                 # second to last seq length + everything we insert in the last step
                 n += len(seq[-1]) + torch.sum(traj_ins[:, -1])
-            
+        
         return tot / n
         
     def _xent(self, l, t, ignore=-1):

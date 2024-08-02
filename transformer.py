@@ -120,18 +120,37 @@ class TransformerDecoderLayer(nn.Module):
     ):
         x = tgt
         x = self.ln_1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
-        x = self.ln_2(x + self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal))
+        res_x, x_attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal)
+        x = self.ln_2(x + res_x)
         x = self.ln_3(x + self._ff_block(x))
-        return x
+        return x, x_attn_weights
 
     def _sa_block(self, x, src_mask, src_key_padding_mask, is_causal):
         return self.dropout_1(self.self_attn(x, x, x, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, need_weights=False, is_causal=is_causal)[0])
     
     def _xa_block(self, x, mem, src_mask, src_key_padding_mask, is_causal=False):
-        return self.dropout_2(self.cross_attn(x, mem, mem, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, is_causal=is_causal, need_weights=False)[0]) 
+        x, attn_weights = self.cross_attn(x, mem, mem, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, is_causal=is_causal, need_weights=True)
+        return self.dropout_2(x), attn_weights
     
     def _ff_block(self, x):
         return self.dropout_3(self.fc_2(self.dropout_fc(self.activation(self.fc_1(x)))))
+    
+class TransformerDecoder(nn.Module):
+   
+    def __init__(self, decoder_layer, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
+        self.num_layers = num_layers
+        
+    def forward(self, tgt, memory, **kwargs):
+        x = tgt
+        attn_weights = []
+        
+        for mod in self.layers:
+            x, x_attn_weights = mod(x, memory, **kwargs) 
+            attn_weights.append(x_attn_weights)
+            
+        return x, attn_weights
 
 class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     

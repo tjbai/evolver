@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 from transformers import BertTokenizer
 
-from model import Evolver
+from evo import Evolver
 from train import train_evolver
 from data import (
     TrajectoryDataset,

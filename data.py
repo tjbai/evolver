@@ -14,7 +14,7 @@ from simalign import SentenceAligner
 from transformers import BertTokenizer
 from torch.utils.data import Dataset, Sampler, DataLoader
 
-from constants import (
+from const import (
     PAD_TOKEN_ID, BOS_TOKEN_ID, VOCAB_SIZE,
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID,
     OP_VERB,

@@ -5,12 +5,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from transformers import BertTokenizer
 
-from constants import *
+from const import *
 from data import get_input_ids
-from model import CosineEmbedding
+from evo import CosineEmbedding
 
 class StackedClassifier(nn.Module):
     

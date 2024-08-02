@@ -23,11 +23,6 @@ from transformer import TransformerEncoder, TransformerEncoderLayer, Transformer
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 
-class PGNEvolver(pl.LightningModule):
-    # PGN but with dynamic evolver-style embeddings
-    
-    pass
-
 class PointerGenerator(pl.LightningModule):
     
     def __init__(
@@ -71,8 +66,6 @@ class PointerGenerator(pl.LightningModule):
         self.tok_head = nn.Linear(d_model, vocab_size)
         if tie_weights: self.tok_head.weight = self.embedding.weight
         
-        self.causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool)
-        
         self.save_hyperparameters()
         
     def _train_loader(self, train_path, tokenizer, batch_size):
@@ -112,7 +105,9 @@ class PointerGenerator(pl.LightningModule):
         tgt, tgt_pad_mask = self._embed(output_ids)
         
         mem = self.encoder(src, src_key_padding_mask=src_pad_mask)
-        h, (*_, attn_weights) = self.decoder(tgt, mem, memory_key_padding_mask=src_pad_mask, tgt_mask=self.causal_mask, tgt_key_padding_mask=tgt_pad_mask)
+        
+        causal_mask = T.generate_square_subsequent_mask(output_ids.shape[1], dtype=torch.bool)
+        h, (*_, attn_weights) = self.decoder(tgt, mem, memory_key_padding_mask=src_pad_mask, tgt_mask=causal_mask, tgt_key_padding_mask=tgt_pad_mask)
        
         ins_logits = F.log_softmax(self.tok_head(h), dim=-1)
         cpy_logits = self._aggregate_dist(attn_weights, input_ids)
@@ -183,6 +178,17 @@ class PointerGenerator(pl.LightningModule):
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=3e-4)
         return {'optimizer': optim}
+    
+class PointerGeneratorEvolver(pl.LightningModule):
+    
+    def _ins_loss(self, p_ins):
+        pass
+    
+    def forward(self, traj_input_ids):
+        pass
+    
+    def training_step(self, batch, _):
+        traj_input_ids, _, (), _ = batch
 
 def parse_args():
     parser = argparse.ArgumentParser()

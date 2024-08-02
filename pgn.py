@@ -165,8 +165,6 @@ class PointerGenerator(pl.LightningModule):
             output_ids = traj_input_ids[:, i+1]
             logits = self.forward(input_ids, output_ids)
             loss, toks = self._nll_loss(logits, output_ids)
-            
-            assert loss >= 0
             self.eval_loss += loss
             self.eval_elbo_loss -= loss
             traj_toks.append(toks)
@@ -219,13 +217,13 @@ def parse_args():
 def main():
     args = parse_args()
     with open(args.config, 'r') as f: config = json.load(f)
+    name = get_name(args.config) 
    
-    logger = None 
+    logger = None
     if not args.local:
         wandb.init(project='evolver', config=config)
-        logger = WandbLogger(project='evolver')
+        logger = WandbLogger(project='evolver', name=name)
        
-    name = get_name(args.config) 
         
     checkpoint_callback = ModelCheckpoint(
         dirpath=f'{REMOTE_PREFIX if args.device=="cuda" else "."}/checkpoints',

@@ -139,8 +139,11 @@ class PointerGenerator(pl.LightningModule):
         loss, toks = self._nll_loss(logits, output_ids)
         self.train_loss += loss
         self.train_toks += toks
-        self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        self.log('train/ppl', torch.exp(loss / toks), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        print(loss, toks)
+        # self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        # self.log('train/ppl', torch.exp(loss / toks), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self.log('train/loss', loss / toks)
+        self.log('train/ppl', torch.exp(loss / toks))
         return loss / toks
     
     def on_validation_epoch_start(self):
@@ -222,17 +225,8 @@ def main():
     logger = None
     if not args.local:
         wandb.init(project='evolver', config=config)
-        logger = WandbLogger(project='evolver', name=name)
+        logger = WandbLogger(project='evolver', name=name, log_model='all')
        
-        
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f'{REMOTE_PREFIX if args.device=="cuda" else "."}/checkpoints',
-        filename=name+'-{epoch:02d}',
-        save_top_k=3,
-        monitor='eval/elbo',
-        mode='max'
-    )
-    
     model = PointerGenerator(
         d_model=config['d_model'],
         dim_feedforward=config['dim_feedforward'],
@@ -247,9 +241,21 @@ def main():
     train_loader = model._train_loader(config['train'], tokenizer, config['batch_size'])
     eval_loader = model._eval_loader(config['eval'], tokenizer, config['batch_size'])
     
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=f'{REMOTE_PREFIX if args.device=="cuda" else "."}/checkpoints',
+        filename=name+'-{step:08d}',
+        save_top_k=3,
+        monitor='eval/elbo',
+        mode='max',
+        every_n_train_steps=config['eval_at'],
+        save_on_train_epoch_end=False
+    )
+    
     trainer = pl.Trainer(
         max_steps=config['train_steps'],
+        limit_val_batches=config['eval_steps'],
         val_check_interval=config['eval_at'],
+        check_val_every_n_epoch=None,
         accumulate_grad_batches=config['grad_accum_steps'],
         callbacks=[checkpoint_callback],
         accelerator=args.device,

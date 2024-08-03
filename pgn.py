@@ -16,7 +16,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from transformers import BertTokenizer
 
 from const import VOCAB_SIZE, PAD_TOKEN_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID
-from utils import get_name, replace
+from utils import get_name, replace, log1mexp
 from embed import SinusoidalEmbedding
 from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
 from transformer import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
@@ -89,16 +89,15 @@ class PointerGenerator(pl.LightningModule):
         # mem: (B, N_in, D)
         # input_tgt: (B, N_out, D)
         # output_tgt: (B, N_out, D)
-        # from Bafna et al. (2024), p_ins = σ(W[c;i;o] + B)
+        # p_ins = σ(W[c;i;o] + B)
         c = torch.bmm(attn_weights, mem)
-        p = F.sigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1)))
-        return p
+        return F.logsigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1)))
     
-    def _aggregate_dist(self, weights, ids):
+    def _aggregate_dist(self, weights, ids, eps=1e-7):
         # ids: (B, N_ins)
         # weights: (B, N_out, N_ins)
         ids = F.one_hot(replace(ids, self.pad_token_id, 0).long(), num_classes=self.vocab_size).float()
-        return torch.log1p(torch.bmm(weights, ids))
+        return torch.log(torch.clamp(torch.bmm(weights, ids), eps, 1-eps))
 
     def forward(self, input_ids, output_ids):
         src, src_pad_mask = self._embed(input_ids)
@@ -113,8 +112,8 @@ class PointerGenerator(pl.LightningModule):
         cpy_logits = self._aggregate_dist(attn_weights, input_ids)
         
         p_ins = self._compute_p_ins(attn_weights, mem, tgt, h)
-        ins_dist = torch.log1p(p_ins) + ins_logits
-        cpy_dist = torch.log1p(-p_ins) + cpy_logits
+        ins_dist = p_ins + ins_logits
+        cpy_dist = log1mexp(p_ins) + cpy_logits
         
         return torch.logsumexp(torch.stack([ins_dist, cpy_dist], dim=-1), dim=-1)
     
@@ -140,11 +139,8 @@ class PointerGenerator(pl.LightningModule):
         loss, toks = self._nll_loss(logits, output_ids)
         self.train_loss += loss
         self.train_toks += toks
-        print('here', loss)
-        # self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        # self.log('train/ppl', torch.exp(loss / toks), on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        self.log('train/loss', loss / toks)
-        self.log('train/ppl', torch.exp(loss / toks))
+        self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self.log('train/ppl', torch.exp(loss / toks), on_step=True, on_epoch=False, prog_bar=True, logger=True)
         return loss / toks
     
     def on_validation_epoch_start(self):

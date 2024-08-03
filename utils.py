@@ -16,3 +16,6 @@ def get_name(config_path):
 
 def replace(t, a, b):
     return torch.where(t == a, b, t)
+
+def log1mexp(p):
+    return torch.log1p(-torch.exp(p))

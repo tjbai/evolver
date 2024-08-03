@@ -19,3 +19,8 @@ def replace(t, a, b):
 
 def log1mexp(p):
     return torch.log1p(-torch.exp(p))
+
+def check_nan(t, name):
+    if torch.isnan(t).any():
+        print(f"NaN detected in {name}")
+        raise Exception()

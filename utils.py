@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 
 import torch
+import pytorch_lightning as pl
 
 def parse_model_id(config_path):
     _, name = os.path.split(config_path)
@@ -22,5 +23,5 @@ def log1mexp(p):
 
 def check_nan(t, name):
     if torch.isnan(t).any():
-        print(f"NaN detected in {name}")
+        print(f'nan detected in {name}')
         raise Exception()

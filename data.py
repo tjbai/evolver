@@ -191,7 +191,7 @@ class SequenceDataset(Dataset):
         assert len(inputs) == len(outputs), 'length mismatch'
        
         s = time.time()
-        logger.info('tokenizing seq2seq pairs')
+        logger.info('tokenizing sequence dataset...')
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
         logger.info(f'done in {time.time() - s:.2f} seconds!')

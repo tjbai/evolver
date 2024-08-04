@@ -16,8 +16,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from transformers import BertTokenizer
 
 from const import VOCAB_SIZE, PAD_TOKEN_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID
-from utils import get_name, replace, log1mexp, check_nan
 from embed import SinusoidalEmbedding
+from utils import get_name, replace, log1mexp, check_nan
 from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
 from transformer import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 
@@ -68,15 +68,15 @@ class PointerGenerator(pl.LightningModule):
         
         self.save_hyperparameters()
         
-    def _train_loader(self, train_path, tokenizer, batch_size):
+    def _train_loader(self, train_path, tokenizer, batch_size, inf=False):
         dataset = SequenceDataset.from_trajectories(path=train_path, max_len=self.N, tokenizer=tokenizer, denoising=True)
-        loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size))
-        return loader
+        if inf: return DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size))
+        else: return DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-    def _eval_loader(self, eval_path, tokenizer, batch_size):
+    def _eval_loader(self, eval_path, tokenizer, batch_size, inf=False):
         dataset = TrajectoryDataset.from_disk(eval_path, max_len=self.N, tokenizer=tokenizer)
-        loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_unsupervised)
-        return loader
+        if inf: return DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_unsupervised)
+        else: return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_unsupervised)
         
     def _embed(self, ids):
         pad_mask = ids.eq(self.pad_token_id)
@@ -223,7 +223,7 @@ class PointerGeneratorEvolver(pl.LightningModule):
     def training_step(self, batch, _):
         traj_input_ids, _, (op_tgts, _, idx_tgts), _ = batch
         
-        # NOTE -- quirk because we're reusing labelhttps://www.clsp.jhu.edu/workshops/s
+        # NOTE -- quirk because we're reusing labels
         op_tgts = torch.argmax(op_tgts, dim=-1)
         op_tgts = replace(op_tgts, SUB_ID, INS_ID)
         op_tgts = replace(op_tgts, EOS_ID, CPY_ID)
@@ -271,10 +271,11 @@ def main():
     )
     
     trainer = pl.Trainer(
-        max_steps=config['train_steps'],
-        limit_val_batches=config['eval_steps'],
-        val_check_interval=config['eval_at'],
+        max_epochs=config.get('train_epochs', None),
+        max_steps=config.get('train_steps', None),
         check_val_every_n_epoch=None,
+        val_check_interval=config['eval_at'],
+        limit_val_batches=config['eval_steps'],
         accumulate_grad_batches=config['grad_accum_steps'],
         callbacks=[checkpoint_callback],
         accelerator=args.device,

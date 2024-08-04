@@ -143,10 +143,10 @@ def particle_filter(
             memory, cache
         )
         
-        # BMxIx_ -> BxMxIx_
+        # BMx_x* -> BxMx_x*
         op_probs, tok_probs, idx_probs = tuple(map(
-            lambda x: x.view(B, M, i, -1),
-            edit_probs
+            lambda x: x[0].view(B, M, -1, x[1]),
+            zip(edit_probs, [5, VOCAB_SIZE, N])
         ))
       
         # basically just black magic

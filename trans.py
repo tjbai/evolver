@@ -186,7 +186,6 @@ class CausalTransformerDecoderLayer(TransformerDecoderLayer):
    
     # same as before, but we only compute keys for the last token! 
     def _causal_sa_block(self, x, tgt, tgt_mask, tgt_key_padding_mask):
-        print('problem starts here')
         return self.dropout_1(self.self_attn(x, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0])
     
 class CausalTransformerDecoder(TransformerDecoder):

@@ -4,7 +4,7 @@ import json
 import wandb
 import logging
 import argparse
-from time import time
+import time
 from functools import wraps
 
 import torch
@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer as T
 from torch.optim import AdamW
-from torch.utils import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 from tqdm import tqdm
 
@@ -74,9 +74,10 @@ class Evolver(nn.Module):
     def __init__(
         self,
         d_model=512,
-        nhead=8,
         dim_feedforward=2048,
+        nhead=8,
         dropout=0.1,
+        layer_norm_eps=1e-5,
         encoder_layers=6,
         decoder_layers=6,
         op_scale=1,
@@ -119,7 +120,7 @@ class Evolver(nn.Module):
             'nhead': nhead,
             'dim_feedforward': dim_feedforward,
             'dropout': dropout,
-            'batch_first': True
+            'layer_norm_eps': layer_norm_eps
         }
         
         EncoderLayer = AdaptiveTransformerEncoderLayer if depth_embeddings else TransformerEncoderLayer
@@ -208,8 +209,8 @@ class Evolver(nn.Module):
         if self.training and memory is not None: raise Exception()
         if self.training and cache is not None: raise Exception()
         
-        src_0, pad_mask = self.get_src(input_ids)
-        src = src_0 if src is None else src
+        _src, pad_mask = self.get_src(input_ids)
+        src = _src if src is None else src
        
         depth_embed = self.depth_embedding(torch.full((B,), t, device=self.device)) if self.depth_embedding else None
         memory = self.encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask) if memory is None else memory
@@ -262,7 +263,7 @@ class Evolver(nn.Module):
 class NoShareEvolver(Evolver):
     '''
     changes:
-    - instantiates and trains multiple encoders/decoders for different trajectory steps
+    - instantiates and trains separate encoders/decoders for different depths (timesteps)
     - uses a naive cycling strategy because we either experiment with depth 1 or depth T
     '''
 
@@ -312,18 +313,18 @@ class PointerStyleEvolver(Evolver):
     - learns "separate" distributions for op and tok/idx, i.e. p(z|x) * p(y|z,x)
     '''
     
-    def forward(self, *args, **kwargs):
-        super.__init__(*args, **kwargs)
-        self.op_head = nn.Linear(3*self.d_model, 4)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.op_head = nn.Linear(3*self.d_model, 5)
     
     def _to_idx_logits(self, attn_weights, eps=1e-7):
         return torch.log(torch.clamp(attn_weights, eps, 1-eps))
     
     def _to_op_logits(self, attn_weights, mem, tgt, h):
-        # attn_weights: (B, N_out, N_in)
-        # mem: (B, N_in, D)
-        # tgt: (B, N_out, D) 
-        # h: (B, N_out, D)
+        if not self.training:
+            tgt = tgt[:, -1:]
+            h = h[:, -1:]
+            
         c = torch.bmm(attn_weights, mem)
         return self.op_head(torch.cat([c, tgt, h], dim=-1))
         
@@ -342,7 +343,7 @@ class PointerStyleEvolver(Evolver):
 
         op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
         tok_logits = self.tok_head(h)
-        idx_logits = self._to_idx_logits(h)
+        idx_logits = self._to_idx_logits(attn_weights)
         
         probs =  (
             F.log_softmax(op_logits, dim=-1),
@@ -351,9 +352,6 @@ class PointerStyleEvolver(Evolver):
         )
         
         return probs, tgt, mem, cache
-    
-    def step():
-        pass
     
 class Transformer(nn.Module):
     '''
@@ -458,7 +456,6 @@ class Transformer(nn.Module):
             labels = F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size)
        
         return xent(tok_probs[:, :-1], labels, ignore=self.pad_token_id)
-
 
 if torch.cuda.is_available():
     device = torch.cuda.current_device()
@@ -683,11 +680,14 @@ def init_run(prefix, name, device, local, config):
     # NOTE -- this is not the same as encoder_layers and decoder_layers
     num_encoders = config.get('num_encoders', 0)
     num_decoders = config.get('num_decoders', 0)
+    
+    if (num_encoders > 1 or num_decoders > 1) and prefix.startswith('noshare'):
+        raise Exception()
 
     Model = \
         Transformer if prefix.startswith('ar') \
-        else PointerStyleEvolver if prefix.startswith('pgn') \
-        else NoShareEvolver if (num_encoders >= 1 or num_decoders >= 1) \
+        else PointerStyleEvolver if prefix.startswith('ps') \
+        else NoShareEvolver if prefix.startswith('noshare') \
         else Evolver
 
     model = Model(
@@ -763,7 +763,6 @@ def main():
     model, optim, lr_scheduler, start_step = init_run(prefix, name, args.device, args.local, args.config)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     
-    # autoregressive seq2seq 
     if prefix.startswith('ar-d'):
         train_dataset = SequenceDataset.from_trajectories(
             path=config['train'],
@@ -799,7 +798,6 @@ def main():
             start_step=start_step
         ) 
        
-    ### baseline autoregressive 
     elif prefix.startswith('ar'):
         train_dataset = SequenceDataset.from_trajectories(
             path=config['train'],
@@ -841,15 +839,14 @@ def main():
             start_step=start_step
         )  
    
-    ### supervised evolver
-    elif prefix.startswith('sup'):
+    if prefix.split('-')[0] in {'sup', 'noshare', 'psn'}:
         train_loader = supervised_loader(
             path=config['train'],
             max_len=config['max_len'],
             tokenizer=tokenizer,
             batch_size=config['batch_size'],
             cache_prefix=prefix.split('.')[0],
-            all_tokens=config.get('all_tokens', False)
+            all_tokens=config.get('all_tokens', True)
         )
         
         eval_loader = unsupervised_loader(
@@ -872,7 +869,6 @@ def main():
             start_step=start_step
         )
     
-    ### unsupervised evolver 
     else:
         train_loader = unsupervised_loader(
             path=config['train'],

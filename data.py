@@ -119,6 +119,10 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
         limit=None, cache_prefix=None, all_tokens=False
     ):
         super().__init__(traj_list, log_probs, max_len, tokenizer, limit)
+       
+        if limit is not None:
+            traj_list = traj_list[:limit] 
+            
         self.all_tokens = all_tokens
         
         aligner = SentenceAligner(
@@ -155,8 +159,8 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
                 F.one_hot(idx_tgts, self.max_len)
             )
             
-def supervised_loader(path, max_len, tokenizer, batch_size, cache_prefix, all_tokens):
-    dataset = SupervisedTrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer, cache_prefix=cache_prefix, all_tokens=all_tokens) 
+def supervised_loader(path, max_len, tokenizer, batch_size, cache_prefix, all_tokens, limit):
+    dataset = SupervisedTrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer, cache_prefix=cache_prefix, all_tokens=all_tokens, limit=limit) 
     loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_supervised, pin_memory=True)
     return loader
 

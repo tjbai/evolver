@@ -119,14 +119,20 @@ class TransformerDecoderLayer(nn.Module):
         tgt_is_causal=False, memory_is_causal=False
     ):
         x = tgt
-        x = self.ln_1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
-        res_x, x_attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal)
-        x = self.ln_2(x + res_x)
-        x = self.ln_3(x + self._ff_block(x))
-        return x, x_attn_weights
+        
+        res = self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal)
+        x = self.ln_1(x + res)
+        
+        res, attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal)
+        x = self.ln_2(x + res)
+        
+        res = self._ff_block(x)
+        x = self.ln_3(x + res)
+        
+        return x, attn_weights
 
-    def _sa_block(self, x, src_mask, src_key_padding_mask, is_causal):
-        return self.dropout_1(self.self_attn(x, x, x, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, need_weights=False, is_causal=is_causal)[0])
+    def _sa_block(self, x, tgt_mask, tgt_key_padding_mask, is_causal):
+        return self.dropout_1(self.self_attn(x, x, x, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask, need_weights=False, is_causal=is_causal)[0])
     
     def _xa_block(self, x, mem, src_mask, src_key_padding_mask, is_causal=False):
         x, attn_weights = self.cross_attn(x, mem, mem, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, is_causal=is_causal, need_weights=True)
@@ -145,84 +151,76 @@ class TransformerDecoder(nn.Module):
     def forward(self, tgt, memory, **kwargs):
         x = tgt
         attn_weights = []
-        
         for mod in self.layers:
-            x, x_attn_weights = mod(x, memory, **kwargs) 
-            attn_weights.append(x_attn_weights)
-            
+            x, layer_attn_weights = mod(x, memory, **kwargs) 
+            attn_weights.append(layer_attn_weights)
         return x, attn_weights
-
-class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     
-    def forward(
-        self,
-        tgt, memory,
-        tgt_key_padding_mask=None,
-        memory_key_padding_mask=None,
-    ):
+class CausalTransformerDecoderLayer(TransformerDecoderLayer):
+    
+    def forward(self, tgt, mem, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        causal_mask = T.generate_square_subsequent_mask(tgt.size(1), tgt.device, dtype=torch.bool)
+        
         if self.training:
             return super().forward(
-                tgt, memory,
-                tgt_mask=T.generate_square_subsequent_mask(tgt.size(1), tgt.device).eq(-torch.inf),
+                tgt, mem,
+                tgt_mask=causal_mask,
+                memory_mask=memory_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask
             )
             
-        tgt_last_tok = tgt[:, -1:, :]
-
-        # self attn
-        tmp_tgt = self.self_attn(
-            tgt_last_tok, tgt, tgt,
-            attn_mask=None, # not needed because we only care about the last token
-            key_padding_mask=tgt_key_padding_mask,
-        )[0]
-        tgt_last_tok = tgt_last_tok + self.dropout1(tmp_tgt)
-        tgt_last_tok = self.norm1(tgt_last_tok)
-
-        # cross attn
-        tmp_tgt = self.multihead_attn(
-            tgt_last_tok, memory, memory,
-            attn_mask=None,
-            key_padding_mask=memory_key_padding_mask,
-        )[0]
-        tgt_last_tok = tgt_last_tok + self.dropout2(tmp_tgt)
-        tgt_last_tok = self.norm2(tgt_last_tok)
-
-        # last ffn
-        tmp_tgt = self.linear2(self.dropout(self.activation(self.linear1(tgt_last_tok))))
-        tgt_last_tok = tgt_last_tok + self.dropout3(tmp_tgt)
-        tgt_last_tok = self.norm3(tgt_last_tok)
+        x = tgt[:, -1:, :]
+      
+        # TODO -- none mask here? 
+        res = self._causal_sa_block(x, tgt, None, tgt_key_padding_mask)
+        x = self.ln_1(x + res)
         
-        return tgt_last_tok
+        res, attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask)
+        x = self.ln_2(x + res)
+       
+        res = self._ff_block(x)
+        x = self.ln_3(x + res)
+        
+        return x, attn_weights
+   
+    # same as before, but we only compute keys for the last token! 
+    def _causal_sa_block(self, x, tgt, tgt_mask, tgt_key_padding_mask):
+        print('problem starts here')
+        return self.dropout_1(self.self_attn(x, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0])
     
-class CausalTransformerDecoder(nn.TransformerDecoder):
-
-    def forward(
-        self,
-        tgt, memory,
-        cache=None,
-        tgt_key_padding_mask=None,
-        memory_key_padding_mask=None,
-    ):
-        x = tgt
-
-        if self.training:
-            for decoder_layer in self.layers:
-                x = decoder_layer(
-                    x, memory,
-                    tgt_key_padding_mask=tgt_key_padding_mask,
-                    memory_key_padding_mask=memory_key_padding_mask,
-                )
-                
-            return x, None
+class CausalTransformerDecoder(TransformerDecoder):
+    
+    def forward(self, tgt, mem, cache=None, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        masks = {
+            'memory_mask': memory_mask,
+            'tgt_key_padding_mask': tgt_key_padding_mask,
+            'memory_key_padding_mask': memory_key_padding_mask
+        }
         
+        x = tgt
+        
+        if self.training:
+            attn_weights = []
+            for mod in self.layers:
+                x, layer_attn_weights = mod(x, mem, **masks)
+                attn_weights.append(layer_attn_weights)
+            return x, attn_weights, None
+        
+        x = tgt
+        attn_weights = []
         new_cache = []
-        for i, decoder_layer in enumerate(self.layers):
-            x = decoder_layer(x, memory)
+        for i, mod in enumerate(self.layers):
+            x, layer_attn_weights = mod(x, mem, **masks)
+            attn_weights.append(layer_attn_weights)
             new_cache.append(x)
-            if cache is not None: x = torch.cat([cache[i], x], dim=1)
+           
+            # cache[i]: (B, N, D)
+            if cache is not None:
+                x = torch.cat([cache[i], x], dim=1)
+                
+        new_cache = torch.stack(new_cache, dim=0)
+        if cache is not None:
+            new_cache = torch.cat([cache, new_cache], dim=2)
             
-        if cache is not None: new_cache = torch.cat([cache, torch.stack(new_cache, dim=0)], dim=2)
-        else: new_cache = torch.stack(new_cache, dim=0)
-
-        return x, new_cache
+        return x, attn_weights, new_cache

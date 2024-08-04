@@ -6,7 +6,6 @@ import logging
 import argparse
 from time import time
 from functools import wraps
-from datetime import datetime
 
 import torch
 import numpy as np
@@ -14,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer as T
 from torch.optim import AdamW
-from torch.utils import Dataset, DataLoader
+from torch.utils import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 from transformers import BertTokenizer
 from tqdm import tqdm
@@ -27,7 +26,7 @@ from embed import (
     LearnedEmbedding,
     DepthEmbedding
 )
-from transformer import (
+from trans import (
     AdaptiveTransformerEncoderLayer, TransformerEncoder,
     CausalTransformerDecoderLayer, CausalTransformerDecoder
 )
@@ -115,7 +114,7 @@ class Evolver(nn.Module):
         self.tok_scale = tok_scale
         self.idx_scale = idx_scale
         
-        transformer_params = {
+        codec_params = {
             'd_model': d_model,
             'nhead': nhead,
             'dim_feedforward': dim_feedforward,
@@ -124,8 +123,8 @@ class Evolver(nn.Module):
         }
         
         EncoderLayer = AdaptiveTransformerEncoderLayer if depth_embeddings else nn.TransformerEncoderLayer
-        encoder_layer = EncoderLayer(**transformer_params)
-        decoder_layer = CausalTransformerDecoderLayer(**transformer_params)
+        encoder_layer = EncoderLayer(**codec_params)
+        decoder_layer = CausalTransformerDecoderLayer(**codec_params)
         self.encoder = TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         self.decoder = CausalTransformerDecoder(decoder_layer, num_layers=decoder_layers)
        
@@ -296,6 +295,11 @@ class NoShareEvolver(Evolver):
 
         probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
         return probs, tgt, memory, cache
+    
+class PointerEvolver(Evolver):
+    
+    def __init__(self, decoder_layers, **kwargs):
+        super().__init__(**kwargs)
     
 class Transformer(nn.Module):
     

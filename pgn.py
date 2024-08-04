@@ -19,7 +19,7 @@ from const import VOCAB_SIZE, PAD_TOKEN_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID
 from embed import SinusoidalEmbedding
 from utils import get_name, replace, log1mexp, check_nan
 from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
-from transformer import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
+from trans import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 
 REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 

@@ -27,7 +27,7 @@ from embed import (
     DepthEmbedding
 )
 from trans import (
-    AdaptiveTransformerEncoderLayer, TransformerEncoder,
+    TransformerEncoderLayer, AdaptiveTransformerEncoderLayer, TransformerEncoder,
     CausalTransformerDecoderLayer, CausalTransformerDecoder
 )
 from data import (
@@ -122,7 +122,7 @@ class Evolver(nn.Module):
             'batch_first': True
         }
         
-        EncoderLayer = AdaptiveTransformerEncoderLayer if depth_embeddings else nn.TransformerEncoderLayer
+        EncoderLayer = AdaptiveTransformerEncoderLayer if depth_embeddings else TransformerEncoderLayer
         encoder_layer = EncoderLayer(**codec_params)
         decoder_layer = CausalTransformerDecoderLayer(**codec_params)
         self.encoder = TransformerEncoder(encoder_layer, num_layers=encoder_layers)
@@ -203,7 +203,7 @@ class Evolver(nn.Module):
         src=None, t=None,
         memory=None, cache=None
     ):
-        B, N = input_ids.shape 
+        B, _ = input_ids.shape
         
         if self.training and memory is not None: raise Exception()
         if self.training and cache is not None: raise Exception()
@@ -214,7 +214,7 @@ class Evolver(nn.Module):
         depth_embed = self.depth_embedding(torch.full((B,), t, device=self.device)) if self.depth_embedding else None
         memory = self.encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask) if memory is None else memory
         tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)
-        output, cache = self.decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
+        output, _, cache = self.decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
         
         op_logits = self.op_head(output)
         tok_logits = self.tok_head(output)
@@ -229,7 +229,7 @@ class Evolver(nn.Module):
             for p, t, i in zip(edit_probs, edit_tgts, [PAD_ID, PAD_TOKEN_ID, 0]
         )), ())
 
-    def traj_loss(self, traj_input_ids, traj_edit_tgts, step=None):
+    def step(self, traj_input_ids, traj_edit_tgts, step=None):
         _, T, _ = traj_input_ids.shape
         tot, n = [0, 0, 0], [0, 0, 0]
        
@@ -260,6 +260,11 @@ class Evolver(nn.Module):
         return traj_loss, tot[0] / N, tot[1] / N, tot[2] / N
 
 class NoShareEvolver(Evolver):
+    '''
+    changes:
+    - instantiates and trains multiple encoders/decoders for different trajectory steps
+    - uses a naive cycling strategy because we either experiment with depth 1 or depth T
+    '''
 
     def __init__(self, *args, num_encoders=1, num_decoders=1, **kwargs):
         super().__init__(*args, **kwargs)
@@ -273,14 +278,12 @@ class NoShareEvolver(Evolver):
         src=None, t=None,
         memory=None, cache=None
     ):
-        B, N = input_ids.shape
-        
         if self.training and memory is not None: raise Exception()
         if self.training and cache is not None: raise Exception()
         if t is None: raise Exception('need depth in no share evolver')
 
-        src_0, pad_mask = self.get_src(input_ids)
-        src = src_0 if src is None else src
+        _src, pad_mask = self.get_src(input_ids)
+        src = _src if src is None else src
 
         cur_encoder = self.encoders[t % self.num_encoders]
         cur_decoder = self.decoders[t % self.num_decoders]
@@ -296,12 +299,68 @@ class NoShareEvolver(Evolver):
         probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
         return probs, tgt, memory, cache
     
-class PointerEvolver(Evolver):
+class PointerStyleEvolver(Evolver):
+    '''
+    changes:
+    - use context embedding, decoder input, and decoder output to predict edits (3*model)
+    - use cross attention weights to construct index distribution
     
-    def __init__(self, decoder_layers, **kwargs):
-        super().__init__(**kwargs)
+    things staying the same:
+    - predict a special EOS op to terminate generation (to keep interfaces consistent)
+    - uses dynamic input embeddings (but preserves ability to ablate with compute_tgt_static)
+    - "learns to point" i.e. explicit supervision over the correct operation rather than a mixture distribution
+    - learns "separate" distributions for op and tok/idx, i.e. p(z|x) * p(y|z,x)
+    '''
+    
+    def forward(self, *args, **kwargs):
+        super.__init__(*args, **kwargs)
+        self.op_head = nn.Linear(3*self.d_model, 4)
+    
+    def _to_idx_logits(self, attn_weights, eps=1e-7):
+        return torch.log(torch.clamp(attn_weights, eps, 1-eps))
+    
+    def _to_op_logits(self, attn_weights, mem, tgt, h):
+        # attn_weights: (B, N_out, N_in)
+        # mem: (B, N_in, D)
+        # tgt: (B, N_out, D) 
+        # h: (B, N_out, D)
+        c = torch.bmm(attn_weights, mem)
+        return self.op_head(torch.cat([c, tgt, h], dim=-1))
+        
+    def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
+        B, _ = input_ids.shape 
+        
+        if self.training and mem is not None: raise Exception() 
+        if self.training and cache is not None: raise Exception()
+        
+        _src, src_pad_mask = self.get_src(input_ids)
+        src = _src if src is None else src
+        
+        mem = self.encoder(src, src_key_padding_mask=src_pad_mask) if mem is None else mem
+        tgt = self.compute_tgt(input_ids, edit_tgts, mem)
+        h, (*_, attn_weights), cache = self.decoder(tgt, mem, cache=cache, memory_key_padding_mask=src_pad_mask)
+
+        op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
+        tok_logits = self.tok_head(h)
+        idx_logits = self._to_idx_logits(h)
+        
+        probs =  (
+            F.log_softmax(op_logits, dim=-1),
+            F.log_softmax(tok_logits, dim=-1),
+            F.log_softmax(idx_logits, dim=-1)
+        )
+        
+        return probs, tgt, mem, cache
+    
+    def step():
+        pass
     
 class Transformer(nn.Module):
+    '''
+    standard transformer used either as:
+    - a decoder-only autoregressive model for one-step generation
+    - an encoder-decoder seq2seq model trained on denoising pairs (x_t, x_{t+1})
+    '''
     
     def __init__(
         self,
@@ -333,7 +392,7 @@ class Transformer(nn.Module):
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.token_embedding.weight # weight tying
         
-        transformer_parameters = {
+        codec_params = {
             'd_model': d_model,
             'nhead': nhead,
             'dropout': dropout,
@@ -341,9 +400,10 @@ class Transformer(nn.Module):
             'batch_first': True,
         }
      
-        encoder_layer = nn.TransformerEncoderLayer(**transformer_parameters)
-        decoder_layer = nn.TransformerDecoderLayer(**transformer_parameters)
+        encoder_layer = nn.TransformerEncoderLayer(**codec_params)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+        
+        decoder_layer = nn.TransformerDecoderLayer(**codec_params)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
         
     def get_src(self, x):
@@ -421,45 +481,63 @@ def record_grad_norms(evolver, step):
         'train/op_grad_norm': grad_norm(evolver.op_head),
         'train/tok_grad_norm': grad_norm(evolver.tok_head),
         'train/idx_grad_norm': grad_norm(evolver.idx_head)
-    }, step=step) 
+    }, step=step)
+    
+def record_train_loss(ls, step):
+    log({
+        'train/total_loss': sum(ls),
+        'train/op_loss': ls[0],
+        'train/tok_loss': ls[1],
+        'train/idx_loss': ls[2],
+    }, step=step)
+    
+def checkpoint_model(model, optim, lr_scheduler, step):
+    save_path = REMOTE_PREFIX if model.device == 'cuda' else '.'
+    torch.save({
+        'step': step,
+        'model': model.state_dict(),
+        'optim': optim.state_dict(),
+        'lr_scheduler': lr_scheduler.state_dict(),
+        'wandb_run_id': None if wandb.run is None else wandb.run.id
+    }, f'{save_path}/checkpoints/{model.name}-{step+1}.pt')
 
 def train_evolver(
     evolver, optim, lr_scheduler, train_loader, eval_loader,
     train_steps, eval_steps, grad_accum_steps, clip_gradients,
     checkpoint_at, eval_at,
     num_particles=None, threshold=None, temperature=1.0, resample_at=1,
-    device='cuda', name='test', start_step=0
+    start_step=0
 ):
+    pf_params = {
+        'num_particles': num_particles,
+        'threshold': threshold,
+        'temperature': temperature,
+        'resample_at': resample_at
+    } 
+    
     for step, (traj_input_ids, _, traj_edit_tgts, _) in tqdm(
         enumerate(train_loader, start=start_step),
         total=train_steps
     ):
         if step >= train_steps: break
-        
-        traj_input_ids = traj_input_ids.to(device)
+        traj_input_ids = traj_input_ids.to(evolver.device)
         
         # E-step
-        evolver.eval() 
         if traj_edit_tgts is not None:
-            traj_edit_tgts = tuple(map(
-                lambda x: x.to(device),
-                traj_edit_tgts
-            ))
+            traj_edit_tgts = tuple(map(lambda x: x.to(evolver.device), traj_edit_tgts))
         else:
             s = time.time()
-            traj_edit_tgts, _ = sample_trajectory(
-                evolver, traj_input_ids,
-                num_particles, threshold, temperature, resample_at
-            )
+            evolver.eval()
+            traj_edit_tgts, _ = sample_trajectory(evolver, traj_input_ids, **pf_params)
             log({'train/e_time': time.time()-s}, step=step)
             
         # M-step
-        s = time.time()
         evolver.train()
-        traj_loss, op_loss, tok_loss, idx_loss = evolver.traj_loss(traj_input_ids, traj_edit_tgts, step=step)
-            
+        traj_loss, *ls = evolver.step(traj_input_ids, traj_edit_tgts, step=step)
         traj_loss.backward()
+        
         record_grad_norms(evolver, step)
+        record_train_loss(ls, step)
         
         if step % grad_accum_steps == 0:
             optim.step()
@@ -468,46 +546,27 @@ def train_evolver(
         if lr_scheduler:
             lr_scheduler.step()
         
-        log({
-            'train/total_loss': op_loss + tok_loss + idx_loss,
-            'train/op_loss': op_loss,
-            'train/tok_loss': tok_loss,
-            'train/idx_loss': idx_loss,
-            'train/m_time': time.time()-s
-        }, step=step)
-        
         if (step + 1) % checkpoint_at == 0:
-            save_path = f'{REMOTE_PREFIX}/checkpoints' if device == 'cuda' else 'checkpoints'
-            torch.save({
-                'step': step,
-                'model': evolver.state_dict(),
-                'optim': optim.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'wandb_run_id': None if wandb.run is None else wandb.run.id
-            }, f'{save_path}/{name}-{step+1}.pt')
+            checkpoint_model(evolver, optim, lr_scheduler, step) 
             
         if (step + 1) % eval_at == 0:
             s = time.time()
-            eval_loss = evolver_elbo(evolver, eval_loader, eval_steps, device)
+            evolver.eval()
+            eval_loss = evolver_elbo(evolver, eval_loader, eval_steps)
             log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
 
 @torch.no_grad()
-def evolver_elbo(evolver, eval_loader, eval_steps, device):
-    evolver.eval()
-    tot_loss = 0
-    tot_n = 0
-    
-    for step, (traj_input_ids, log_posterior, _, n) in enumerate(eval_loader):
+def evolver_elbo(evolver, eval_loader, eval_steps):
+    loss = 0
+    toks = 0
+    for step, (traj_input_ids, post, _, n) in enumerate(eval_loader):
         if step >= eval_steps: break
-        
-        traj_input_ids = traj_input_ids.to(device)
-        log_posterior = log_posterior.to(device)
-        
-        _, log_likelihood = sample_trajectory(evolver, traj_input_ids, num_particles=1, temperature=0.5)
-        tot_loss += torch.sum(log_likelihood - log_posterior)
-        tot_n += n
-       
-    return tot_loss / tot_n
+        traj_input_ids = traj_input_ids.to(evolver.device)
+        post = post.to(evolver.device)
+        _, ll = sample_trajectory(evolver, traj_input_ids, num_particles=1, temperature=0.5)
+        loss += torch.sum(ll - post)
+        toks += n
+    return loss / toks
 
 def train_ar(
     model, optim, lr_scheduler,
@@ -558,19 +617,6 @@ def train_ar(
                 eval_loss = ar_likelihood(model, eval_loader, eval_steps, input_is_tgt, device)
             log({'eval/loss': eval_loss.item()}, step=step)
 
-def traj_likelihood(model, traj_input_ids): 
-    B, T, _ = traj_input_ids.shape
-    tot_loss = tot_n = 0
-    
-    for i in range(T-1):
-        input_ids = traj_input_ids[:, i]
-        output_ids = traj_input_ids[:, i+1]
-        
-        loss, _ = model.loss(input_ids, output_ids)
-        tot_loss += loss
-        
-    return -tot_loss
-            
 @torch.no_grad()
 def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
     model.eval()
@@ -588,6 +634,19 @@ def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
         tot_n += n
        
     return tot_loss / tot_n
+
+def traj_likelihood(model, traj_input_ids): 
+    _, T, _ = traj_input_ids.shape
+    tot_loss = tot_n = 0
+    
+    for i in range(T-1):
+        input_ids = traj_input_ids[:, i]
+        output_ids = traj_input_ids[:, i+1]
+        
+        loss, _ = model.loss(input_ids, output_ids)
+        tot_loss += loss
+        
+    return -tot_loss
 
 @torch.no_grad()
 def ar_likelihood(model, eval_loader: SequenceDataset, eval_steps, input_is_tgt, device):
@@ -626,9 +685,10 @@ def init_run(prefix, name, device, local, config):
     num_decoders = config.get('num_decoders', 0)
 
     Model = \
-    Transformer if prefix.startswith('ar') \
-    else NoShareEvolver if (num_encoders >= 1 or num_decoders >= 1) \
-    else Evolver
+        Transformer if prefix.startswith('ar') \
+        else PointerStyleEvolver if prefix.startswith('pgn') \
+        else NoShareEvolver if (num_encoders >= 1 or num_decoders >= 1) \
+        else Evolver
 
     model = Model(
         d_model=config['d_model'],
@@ -809,7 +869,6 @@ def main():
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             device=args.device,
-            name=name,
             start_step=start_step
         )
     
@@ -843,7 +902,6 @@ def main():
             temperature=config['temperature'],
             resample_at=config['resample_at'],
             device=args.device,
-            name=name,
             start_step=start_step
         )
 

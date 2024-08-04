@@ -276,16 +276,16 @@ def fast_sample(
         
         # update the living
         alive &= ~ops.eq(EOS_ID)
-        ens_ops[torch.arange(B*M, device=device)[alive], i, ops[alive]] = 1
-        ens_toks[torch.arange(B*M, device=device)[alive], i, toks[alive]] = 1
-        ens_idxs[torch.arange(B*M, device=device)[alive], i, idxs[alive]] = 1
+        ens_ops[torch.arange(B*M, device=device)[alive], t, ops[alive]] = 1
+        ens_toks[torch.arange(B*M, device=device)[alive], t, toks[alive]] = 1
+        ens_idxs[torch.arange(B*M, device=device)[alive], t, idxs[alive]] = 1
     
         # update log probs 
         log_probs += op_probs[torch.arange(B*M), ops]
         log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
         log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
         
-        if i % resample_at == 0:
+        if t % resample_at == 0:
             weights = log_probs.view(B, M) - torch.logsumexp(log_probs.view(B, M), dim=-1, keepdim=True)
             samples, _ = maybe_resample(weights, threshold, M)
             
@@ -360,9 +360,7 @@ def _decode(
     alive = torch.ones(B, dtype=torch.bool)
     op_tgts, tok_tgts, index_tgts = edit_tgts
     
-    if strategy == 'greedy': decoder = decode_greedy
-    elif strategy == 'stochastic': decoder = decode_stochastic
-    else: raise NotImplementedError()
+    raise NotImplementedError()
     
     for i in range(1, max_len):
         
@@ -525,18 +523,3 @@ def _sample_trajectory(
         log_traj_prob += log_prob
     
     return tuple(map(lambda x: torch.stack(x).squeeze(), traj_edit_tgts)), log_traj_prob
-
-def _baseline_elbo(model, tokenizer, observed, num_samples=5, device='cuda'):
-    model.eval()
-    samples, log_posteriors = zip(*[noise(observed) for _ in range(num_samples)])
-    T = max(len(s) for s in samples)
-    
-    traj_input_ids = torch.stack(
-        [pad_traj_input_ids(
-            get_input_ids(s, model.max_len, tokenizer), T
-        ).to(device) for s in samples]
-    )
-   
-    log_likelihoods = baseline_likelihood(model, traj_input_ids) 
-    tot = log_likelihoods - log_posteriors
-    return torch.sum(tot) / num_samples

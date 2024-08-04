@@ -17,7 +17,7 @@ from transformers import BertTokenizer
 
 from const import VOCAB_SIZE, PAD_TOKEN_ID, INS_ID, CPY_ID, SUB_ID, EOS_ID
 from embed import SinusoidalEmbedding
-from utils import get_name, replace, log1mexp, check_nan
+from utils import get_name, replace, log1mexp
 from data import SequenceDataset, StratifiedInfiniteSampler, TrajectoryDataset, collate_unsupervised
 from trans import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 
@@ -103,24 +103,15 @@ class PointerGenerator(pl.LightningModule):
     def forward(self, input_ids, output_ids):
         src, src_pad_mask = self._embed(input_ids)
         tgt, tgt_pad_mask = self._embed(output_ids)
-        check_nan(src, 'src')
-        check_nan(tgt, 'tgt')
         
         mem = self.encoder(src, src_key_padding_mask=src_pad_mask)
-        check_nan(mem, 'mem')
-        
         causal_mask = T.generate_square_subsequent_mask(output_ids.shape[1], dtype=torch.bool, device=tgt.device)
         h, (*_, attn_weights) = self.decoder(tgt, mem, memory_key_padding_mask=src_pad_mask, tgt_mask=causal_mask, tgt_key_padding_mask=tgt_pad_mask)
-        check_nan(h, 'h')
-        check_nan(attn_weights, 'attn_weights')
        
         ins_logits = F.log_softmax(self.tok_head(h), dim=-1)
         cpy_logits = self._aggregate_dist(attn_weights, input_ids)
-        check_nan(ins_logits, 'ins_logits')
-        check_nan(cpy_logits, 'cpy_logits')
         
         p_ins = self._compute_p_ins(attn_weights, mem, tgt, h)
-        check_nan(p_ins, 'p_ins')
         ins_dist = p_ins + ins_logits
         cpy_dist = log1mexp(p_ins) + cpy_logits
         
@@ -145,9 +136,7 @@ class PointerGenerator(pl.LightningModule):
     def training_step(self, batch, _):
         input_ids, output_ids = batch
         logits = self.forward(input_ids, output_ids)
-        check_nan(logits, 'logits')
         loss, toks = self._nll_loss(logits, output_ids)
-        check_nan(loss, 'loss')
         self.train_loss += loss
         self.train_toks += toks
         self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)

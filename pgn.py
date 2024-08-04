@@ -84,14 +84,15 @@ class PointerGenerator(pl.LightningModule):
         x = self.positional_embedding(x, d=1)
         return x, pad_mask
     
-    def _compute_p_ins(self, attn_weights, mem, input_tgt, output_tgt):
+    def _compute_p_ins(self, attn_weights, mem, input_tgt, output_tgt, eps=1e-7):
         # attn_weights: (B, N_out, N_in)
         # mem: (B, N_in, D)
         # input_tgt: (B, N_out, D)
         # output_tgt: (B, N_out, D)
         # p_ins = σ(W[c;i;o] + B)
         c = torch.bmm(attn_weights, mem)
-        return F.logsigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1)))
+        p = F.sigmoid(self.ins_fc(torch.cat([c, input_tgt, output_tgt], dim=-1)))
+        return torch.log(torch.clamp(p, eps, 1-eps))
     
     def _aggregate_dist(self, weights, ids, eps=1e-7):
         # ids: (B, N_ins)
@@ -186,11 +187,14 @@ class PointerGenerator(pl.LightningModule):
     def configure_optimizers(self):
         optim = AdamW(self.parameters(), lr=3e-4)
         
-        def nan_grad_hook(mod, grad_in, _):
+        def nan_grad_hook(mod, grad_in, grad_out):
             if any(torch.isnan(gi).any() for gi in grad_in if gi is not None):
-                print(f'nan grad in {mod.__class__.__name__}')
+                print(f'nan input grad in {mod.__class__.__name__}')
+                
+            if any(torch.isnan(go).any() for go in grad_out if go is not None):
+                print(f'nan output grad in {mod.__class__.__name__}')
             
-        for name, mod in self.named_modules():
+        for _, mod in self.named_modules():
             mod.register_backward_hook(nan_grad_hook)
         
         return {'optimizer': optim}

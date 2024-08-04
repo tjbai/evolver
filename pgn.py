@@ -117,15 +117,6 @@ class PointerGenerator(pl.LightningModule):
         
         return torch.logsumexp(torch.stack([ins_dist, cpy_dist], dim=-1), dim=-1)
     
-    def on_train_epoch_start(self):
-        self.train_loss = 0
-        self.train_toks = 0
-
-    def on_train_epoch_end(self):
-        loss = self.train_loss / self.train_toks if self.train_toks > 0 else 0
-        self.log('train/epoch_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train/epoch_ppl', torch.exp(loss), on_step=False, on_epoch=True, prog_bar=True, logger=True)
-    
     def _nll_loss(self, logits, output_ids):
         logits = logits[:, :-1].reshape(-1, self.vocab_size)
         output_ids = output_ids[:, 1:].reshape(-1)
@@ -137,8 +128,6 @@ class PointerGenerator(pl.LightningModule):
         input_ids, output_ids = batch
         logits = self.forward(input_ids, output_ids)
         loss, toks = self._nll_loss(logits, output_ids)
-        self.train_loss += loss
-        self.train_toks += toks
         self.log('train/loss', loss / toks, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         self.log('train/ppl', torch.exp(loss / toks), on_step=True, on_epoch=False, prog_bar=True, logger=True)
         return loss / toks

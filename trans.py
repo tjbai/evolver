@@ -234,9 +234,9 @@ class MultiheadPointer(nn.MultiheadAttention):
         return super().__init__(*args, **kwargs)
     
     def forward(self, query, key, attn_mask=None, key_padding_mask=None):
-        if query.dim() == 3 and query.shape[1] != self.embed_dim:
+        if query.dim() == 3:
             query = query.transpose(0, 1)
-        if key.dim() == 3 and key.shape[1] != self.embed_dim:
+        if key.dim() == 3:
             key = key.transpose(0, 1) 
         if attn_mask is not None and attn_mask.dim() == 3:
             attn_mask = attn_mask.transpose(0, 1)
@@ -248,6 +248,7 @@ class MultiheadPointer(nn.MultiheadAttention):
             self.bias_k, self.bias_v, self.add_zero_attn,
             self.dropout, self.out_proj.weight, self.out_proj.bias,
             training=self.training,
-            key_padding_mask=key_padding_mask, need_weights=True,
-            attn_mask=attn_mask
+            need_weights=True,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
         )[1]

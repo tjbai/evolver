@@ -18,5 +18,7 @@
     "batch_size": 1,
     "grad_accum_steps": 1,
     "checkpoint_at": 500,
-    "eval_at": 100
+    "eval_at": 20,
+
+    "pointer_attn": true
 }

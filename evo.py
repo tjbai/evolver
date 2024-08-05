@@ -31,7 +31,8 @@ from trans import (
     AdaptiveTransformerEncoderLayer,
     TransformerEncoder,
     CausalTransformerDecoderLayer,
-    CausalTransformerDecoder
+    CausalTransformerDecoder,
+    MultiheadPointer
 )
 from data import (
     TrajectoryDataset,
@@ -108,6 +109,7 @@ class Evolver(nn.Module):
         
         self.d_model = d_model
         self.nhead = nhead
+        self.dropout = dropout
         self.max_len = max_len
         self.device = device
         self.vocab_size = vocab_size
@@ -282,7 +284,7 @@ class Evolver(nn.Module):
 class PointerStyleEvolver(Evolver):
     '''
     changes:
-    - use context embedding, decoder input, and decoder output to predict edits (3*model)
+    - use context embedding, decoder input, and decoder output to predict edits (3*d_model)
     - use cross attention weights to construct index distribution
     
     things staying the same:
@@ -292,9 +294,19 @@ class PointerStyleEvolver(Evolver):
     - learns "separate" distributions for op and tok/idx, i.e. p(z|x) * p(y|z,x)
     '''
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, pointer_attn=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.op_head = nn.Linear(3*self.d_model, 5)
+        self.pointer_attn = pointer_attn
+        if self.pointer_attn:
+            self.pointer = MultiheadPointer(
+                embed_dim=self.d_model,
+                num_heads=self.nhead,
+                dropout=self.dropout,
+                bias=True,
+                add_bias_kv=False,
+                add_zero_attn=False
+            )
     
     def _to_idx_logits(self, attn_weights, eps=1e-7):
         return torch.log(torch.clamp(attn_weights, eps, 1-eps))
@@ -308,8 +320,6 @@ class PointerStyleEvolver(Evolver):
         return self.op_head(torch.cat([c, tgt, h], dim=-1))
         
     def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
-        B, _ = input_ids.shape 
-        
         if self.training and mem is not None: raise Exception() 
         if self.training and cache is not None: raise Exception()
         
@@ -323,7 +333,9 @@ class PointerStyleEvolver(Evolver):
 
         op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
         tok_logits = self.tok_head(h)
-        idx_logits = self._to_idx_logits(attn_weights)
+       
+        idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
+        idx_logits = self._to_idx_logits(idx_weights)
         
         probs =  (
             F.log_softmax(op_logits, dim=-1),
@@ -683,6 +695,7 @@ def init_run(name, config):
         positional_embeddings=config.get('positional_embeddings', 'sinu'),
         static_embeddings=config.get('static_embeddings', False),
         depth_embeddings=config.get('depth_embeddings', False),
+        pointer_attn=config.get('pointer_attn', False),
         device=config['device'],
         name=name
     ).to(config['device'])

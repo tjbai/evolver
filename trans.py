@@ -223,3 +223,31 @@ class CausalTransformerDecoder(TransformerDecoder):
             new_cache = torch.cat([cache, new_cache], dim=2)
             
         return x, attn_weights, new_cache
+
+class MultiheadPointer(nn.MultiheadAttention):
+    '''
+    like multihead attention but only returns attn_weights
+    this creates useless value parameters but is quick and dirty
+    ''' 
+    
+    def __init__(self, *args, **kwargs):
+        return super().__init__(*args, **kwargs)
+    
+    def forward(self, query, key, attn_mask=None, key_padding_mask=None):
+        if query.dim() == 3 and query.shape[1] != self.embed_dim:
+            query = query.transpose(0, 1)
+        if key.dim() == 3 and key.shape[1] != self.embed_dim:
+            key = key.transpose(0, 1) 
+        if attn_mask is not None and attn_mask.dim() == 3:
+            attn_mask = attn_mask.transpose(0, 1)
+        
+        return F.multi_head_attention_forward(
+            query, key, key,
+            self.embed_dim, self.num_heads,
+            self.in_proj_weight, self.in_proj_bias,
+            self.bias_k, self.bias_v, self.add_zero_attn,
+            self.dropout, self.out_proj.weight, self.out_proj.bias,
+            training=self.training,
+            key_padding_mask=key_padding_mask, need_weights=True,
+            attn_mask=attn_mask
+        )[1]

@@ -87,6 +87,8 @@ class Evolver(nn.Module):
         layer_norm_eps=1e-5,
         encoder_layers=6,
         decoder_layers=6,
+        num_encoders=1,
+        num_decoders=1,
         op_scale=1,
         tok_scale=1,
         idx_scale=1,
@@ -130,11 +132,14 @@ class Evolver(nn.Module):
             'layer_norm_eps': layer_norm_eps
         }
         
-        EncoderLayer = AdaptiveTransformerEncoderLayer if depth_embeddings else TransformerEncoderLayer
-        encoder_layer = EncoderLayer(**codec_params)
-        decoder_layer = CausalTransformerDecoderLayer(**codec_params)
+        encoder_layer = AdaptiveTransformerEncoderLayer if depth_embeddings else TransformerEncoderLayer
+        encoder_layer = encoder_layer(**codec_params)
         self.encoder = TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+        self.encoder_list = [copy.deepcopy(self.encoder) for _ in range(num_encoders)]
+        
+        decoder_layer = CausalTransformerDecoderLayer(**codec_params)
         self.decoder = CausalTransformerDecoder(decoder_layer, num_layers=decoder_layers)
+        self.decoder_list = [copy.deepcopy(self.decoder) for _ in range(num_decoders)]
        
         self.op_head = nn.Linear(d_model, 5)
         self.tok_head = nn.Linear(d_model, self.vocab_size)
@@ -205,6 +210,10 @@ class Evolver(nn.Module):
         *_, idx_logits = edit_logits
         idx_logits[pad_mask.unsqueeze(1).expand_as(idx_logits)] = -1e9
         return tuple(map(lambda x: F.log_softmax(x, dim=-1), edit_logits))
+    
+    def _get_codec(self, t):
+        if t is None: return self.encoder, self.decoder
+        return self.encoder_list[t % len(self.encoder_list)], self.decoder_list[t % len(self.decoder_list)]
   
     def forward(
         self, input_ids, edit_tgts,
@@ -218,11 +227,12 @@ class Evolver(nn.Module):
         
         _src, pad_mask = self.get_src(input_ids)
         src = _src if src is None else src
-       
+        
+        encoder, decoder = self._get_codec(t)
         depth_embed = self.depth_embedding(torch.full((B,), t, device=self.device)) if self.depth_embedding else None
-        memory = self.encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask) if memory is None else memory
+        memory = encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask) if memory is None else memory
         tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)
-        output, _, cache = self.decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
+        output, _, cache = decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
         
         op_logits = self.op_head(output)
         tok_logits = self.tok_head(output)
@@ -266,46 +276,6 @@ class Evolver(nn.Module):
     
         N = torch.sum(~(traj_input_ids.eq(PAD_TOKEN_ID)[:, 1:, :])) 
         return traj_loss, tot[0] / N, tot[1] / N, tot[2] / N
-
-class NoShareEvolver(Evolver):
-    '''
-    changes:
-    - instantiates and trains separate encoders/decoders for different depths (timesteps)
-    - uses a naive cycling strategy because we either experiment with depth 1 or depth T
-    '''
-
-    def __init__(self, *args, num_encoders=1, num_decoders=1, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.num_encoders = num_encoders
-        self.num_decoders = num_decoders
-        self.encoders = nn.ModuleList([copy.deepcopy(self.encoder) for _ in range(num_encoders)])
-        self.decoders = nn.ModuleList([copy.deepcopy(self.decoder) for _ in range(num_decoders)])
-
-    def forward(
-        self, input_ids, edit_tgts,
-        src=None, t=None,
-        memory=None, cache=None
-    ):
-        if self.training and memory is not None: raise Exception()
-        if self.training and cache is not None: raise Exception()
-        if t is None: raise Exception('need depth in no share evolver')
-
-        _src, pad_mask = self.get_src(input_ids)
-        src = _src if src is None else src
-
-        cur_encoder = self.encoders[t % self.num_encoders]
-        cur_decoder = self.decoders[t % self.num_decoders]
-
-        memory = cur_encoder(src, depth_embed=None, src_key_padding_mask=pad_mask) if memory is None else memory
-        tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)
-        output, cache = cur_decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
-
-        op_logits = self.op_head(output)
-        tok_logits = self.tok_head(output)
-        idx_logits = self.idx_head(output)
-
-        probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
-        return probs, tgt, memory, cache
     
 class PointerStyleEvolver(Evolver):
     '''
@@ -343,10 +313,11 @@ class PointerStyleEvolver(Evolver):
         
         _src, src_pad_mask = self.get_src(input_ids)
         src = _src if src is None else src
-        
-        mem = self.encoder(src, src_key_padding_mask=src_pad_mask) if mem is None else mem
+       
+        encoder, decoder = self._get_codec(t)
+        mem = encoder(src, src_key_padding_mask=src_pad_mask) if mem is None else mem
         tgt = self.compute_tgt(input_ids, edit_tgts, mem)
-        h, (*_, attn_weights), cache = self.decoder(tgt, mem, cache=cache, memory_key_padding_mask=src_pad_mask)
+        h, (*_, attn_weights), cache = decoder(tgt, mem, cache=cache, memory_key_padding_mask=src_pad_mask)
 
         op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
         tok_logits = self.tok_head(h)
@@ -691,7 +662,6 @@ def init_run(name, config):
     model = \
         Transformer if name.startswith('ar') \
         else PointerStyleEvolver if name.startswith('ps') \
-        else NoShareEvolver if name.startswith('noshare') \
         else Evolver
         
     logger.info(f'using {model}')
@@ -702,6 +672,8 @@ def init_run(name, config):
         dropout=config['dropout'],
         encoder_layers=config['encoder_layers'],
         decoder_layers=config['decoder_layers'],
+        num_encoders=config.get('num_encoders', 1),
+        num_decoders=config.get('num_decoders', 1),
         max_len=config['max_len'],
         op_scale=config.get('op_scale', 1),
         tok_scale=config.get('tok_scale', 1),
@@ -709,8 +681,6 @@ def init_run(name, config):
         positional_embeddings=config.get('positional_embeddings', 'sinu'),
         static_embeddings=config.get('static_embeddings', False),
         depth_embeddings=config.get('depth_embeddings', False),
-        num_encoders=config.get('num_encoders', 1),
-        num_decoders=config.get('num_decoders', 1),
         device=config['device']
     ).to(config['device'])
     

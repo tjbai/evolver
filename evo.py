@@ -675,19 +675,11 @@ def parse_args():
     parser.add_argument('--log-level', default='INFO')
     return parser.parse_args()
 
-def init_run(prefix, name, device, local, config):
-    
-    # NOTE -- this is not the same as encoder_layers and decoder_layers
-    num_encoders = config.get('num_encoders', 0)
-    num_decoders = config.get('num_decoders', 0)
-    
-    if (num_encoders > 1 or num_decoders > 1) and prefix.startswith('noshare'):
-        raise Exception()
-
+def init_run(name, config):
     Model = \
-        Transformer if prefix.startswith('ar') \
-        else PointerStyleEvolver if prefix.startswith('ps') \
-        else NoShareEvolver if prefix.startswith('noshare') \
+        Transformer if name.startswith('ar') \
+        else PointerStyleEvolver if name.startswith('ps') \
+        else NoShareEvolver if name.startswith('noshare') \
         else Evolver
 
     model = Model(
@@ -704,9 +696,9 @@ def init_run(prefix, name, device, local, config):
         positional_embeddings=config.get('positional_embeddings', 'sinu'),
         static_embeddings=config.get('static_embeddings', False),
         depth_embeddings=config.get('depth_embeddings', False),
-        num_encoders=num_encoders,
-        num_decoders=num_decoders,
-        device=device
+        num_encoders=config.get('num_encoders', 1),
+        num_decoders=config.get('num_decoders', 1),
+        device=config['device']
     ).to(device)
     
     optim = AdamW(model.parameters(), lr=config['lr'])
@@ -740,7 +732,7 @@ def init_run(prefix, name, device, local, config):
         wandb_run_id = wandb.util.generate_id()
         logger.info('starting new run')
 
-    if not local:
+    if not config['local']:
         wandb.init(
             id=wandb_run_id,
             project='evolver',
@@ -752,79 +744,42 @@ def init_run(prefix, name, device, local, config):
     
     return model, optim, lr_scheduler, start_step
 
+def init_loaders(name, config):
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    kwargs = {'max_len': config['max_len'], 'tokenizer': tokenizer, 'batch_size': config['batch_size']}
+
+    if name.startswith('ar'):
+        train_dataset = SequenceDataset.from_trajectories(path=config['train'], denoising=True, **kwargs)
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']))
+        eval_loader = (
+            unsupervised_loader(path=config['eval'], **kwargs)
+            if name.startswith('ar-d') else
+            DataLoader(SequenceDataset.from_trajectories(path=config['eval'], denoising=True, **kwargs), batch_size=config['batch_size'], shuffle=True)
+        )
+    elif name.split('-')[0] in {'sup', 'noshare', 'psn'}:
+        train_loader = supervised_loader(path=config['train'], cache_prefix=name.split('.')[0], all_tokens=config.get('all_tokens', True), **kwargs)
+        eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
+    else:
+        train_loader = unsupervised_loader(path=config['train'], **kwargs)
+        eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
+
+    return train_loader, eval_loader
+
 def main():
     args = parse_args()
     logger.setLevel(getattr(logging, args.log_level))
+    
     with open(args.config, 'r') as f: config = json.load(f)
+    config['device'] = args.device
+    config['local'] = args.local
     
     prefix = parse_model_id(args.config)
     name = get_name(args.config)
     
-    model, optim, lr_scheduler, start_step = init_run(prefix, name, args.device, args.local, args.config)
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    model, optim, lr_scheduler, start_step = init_run(name, config)
+    train_loader, eval_loader = init_loaders(name, config)
     
-    if prefix.startswith('ar-d'):
-        train_dataset = SequenceDataset.from_trajectories(
-            path=config['train'],
-            denoising=True,
-            max_len=config['max_len'],
-            tokenizer=tokenizer
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
-        )
-        
-        eval_loader = unsupervised_loader(
-            path=config['eval'],
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-            batch_size=config['batch_size'],
-        )
-
-        train_ar(
-            model, optim, lr_scheduler,
-            train_loader, eval_loader,
-            train_steps=config['train_steps'],
-            eval_steps=config['eval_steps'],
-            grad_accum_steps=config['grad_accum_steps'],
-            checkpoint_at=config['checkpoint_at'],
-            eval_at=config['eval_at'],
-            input_is_tgt=False,
-            device=args.device,
-            name=name,
-            start_step=start_step
-        ) 
-       
-    elif prefix.startswith('ar'):
-        train_dataset = SequenceDataset.from_trajectories(
-            path=config['train'],
-            denoising=True,
-            max_len=config['max_len'],
-            tokenizer=tokenizer
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['batch_size'],
-            sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size'])
-        )
-        
-        eval_dataset = SequenceDataset.from_trajectories(
-            path=config['eval'],
-            denoising=True,
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
-            batch_size=config['batch_size'],
-            shuffle=True
-        )
-
+    if prefix.startswith('ar'):
         train_ar(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
@@ -840,22 +795,6 @@ def main():
         )  
    
     if prefix.split('-')[0] in {'sup', 'noshare', 'psn'}:
-        train_loader = supervised_loader(
-            path=config['train'],
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-            batch_size=config['batch_size'],
-            cache_prefix=prefix.split('.')[0],
-            all_tokens=config.get('all_tokens', True)
-        )
-        
-        eval_loader = unsupervised_loader(
-            path=config['eval'],
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-            batch_size=config['batch_size'],
-        )
-        
         train_evolver(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
@@ -870,20 +809,6 @@ def main():
         )
     
     else:
-        train_loader = unsupervised_loader(
-            path=config['train'],
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-            batch_size=config['batch_size'],
-        )
-        
-        eval_loader = unsupervised_loader(
-            path=config['eval'],
-            max_len=config['max_len'],
-            tokenizer=tokenizer,
-            batch_size=config['batch_size'],
-        )
-        
         train_evolver(
             model, optim, lr_scheduler,
             train_loader, eval_loader,

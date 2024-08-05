@@ -101,6 +101,7 @@ class Evolver(nn.Module):
         static_embeddings=False,
         depth_embeddings=False,
         device='cpu',
+        name=None,
         **_,
     ):
         super().__init__()
@@ -114,6 +115,7 @@ class Evolver(nn.Module):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.static_embeddings = static_embeddings
+        self.name = name
       
         PositionalEmbedding = SinusoidalEmbedding if positional_embeddings == 'sinu' else LearnedEmbedding
         self.positional_embedding = PositionalEmbedding(d_model=d_model, max_len=max_len)
@@ -135,11 +137,11 @@ class Evolver(nn.Module):
         encoder_layer = AdaptiveTransformerEncoderLayer if depth_embeddings else TransformerEncoderLayer
         encoder_layer = encoder_layer(**codec_params)
         self.encoder = TransformerEncoder(encoder_layer, num_layers=encoder_layers)
-        self.encoder_list = [copy.deepcopy(self.encoder) for _ in range(num_encoders)]
+        self.encoder_list = nn.ModuleList([copy.deepcopy(self.encoder) for _ in range(num_encoders)])
         
         decoder_layer = CausalTransformerDecoderLayer(**codec_params)
         self.decoder = CausalTransformerDecoder(decoder_layer, num_layers=decoder_layers)
-        self.decoder_list = [copy.deepcopy(self.decoder) for _ in range(num_decoders)]
+        self.decoder_list = nn.ModuleList([copy.deepcopy(self.decoder) for _ in range(num_decoders)])
        
         self.op_head = nn.Linear(d_model, 5)
         self.tok_head = nn.Linear(d_model, self.vocab_size)
@@ -681,7 +683,8 @@ def init_run(name, config):
         positional_embeddings=config.get('positional_embeddings', 'sinu'),
         static_embeddings=config.get('static_embeddings', False),
         depth_embeddings=config.get('depth_embeddings', False),
-        device=config['device']
+        device=config['device'],
+        name=name
     ).to(config['device'])
     
     optim = AdamW(model.parameters(), lr=config['lr'])
@@ -773,6 +776,14 @@ def main():
     config['train_steps']  = train_steps
     logger.info(f'starting run for {train_steps} steps')
     
+    if config['eval_at'] < 1:
+        config['eval_at'] = int(train_steps * config['eval_at'])
+    logger.info(f'eval every {config["eval_at"]} steps')
+        
+    if config['checkpoint_at'] < 1:
+         config['checkpoint_at'] = int(train_steps * config['checkpoint_at'])
+    logger.info(f'checkpoint every {config["checkpoint_at"]} steps')
+    
     model, optim, lr_scheduler, start_step = init_run(name, config)
     
     if prefix.startswith('ar'):
@@ -818,6 +829,9 @@ def main():
             resample_at=config['resample_at'],
             start_step=start_step
         )
+       
+    # get a final checkpoint
+    checkpoint_model(model, optim, lr_scheduler, None)
 
 if __name__ == '__main__':
     main()

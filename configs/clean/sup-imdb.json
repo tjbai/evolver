@@ -1,7 +1,7 @@
 {
     "train": "data/imdb/imdb_train_3.jsonl",
     "eval": "data/imdb/imdb_dev_3.jsonl",
-    "notes": "baseline pointer-style",
+    "notes": "baseline regular evolver",
     "cache_prefix": "sup-imdb-3",
 
     "d_model": 512,
@@ -19,8 +19,8 @@
     "clip_gradients": false,
     "num_epochs": 3,
     "eval_steps": 50,
-    "batch_size": 1,
-    "grad_accum_steps": 16,
+    "batch_size": 4,
+    "grad_accum_steps": 4,
     "checkpoint_at": 0.33,
     "eval_at": 0.1,
 

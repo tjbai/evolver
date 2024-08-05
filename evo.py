@@ -27,12 +27,19 @@ from embed import (
     DepthEmbedding
 )
 from trans import (
-    TransformerEncoderLayer, AdaptiveTransformerEncoderLayer, TransformerEncoder,
-    CausalTransformerDecoderLayer, CausalTransformerDecoder
+    TransformerEncoderLayer,
+    AdaptiveTransformerEncoderLayer,
+    TransformerEncoder,
+    CausalTransformerDecoderLayer,
+    CausalTransformerDecoder
 )
 from data import (
-    TrajectoryDataset, SequenceDataset, StratifiedInfiniteSampler,
-    elaborate, unsupervised_loader, supervised_loader
+    TrajectoryDataset,
+    SequenceDataset,
+    StratifiedInfiniteSampler,
+    InfiniteSampler,
+    unsupervised_loader,
+    supervised_loader
 )
 
 logging.basicConfig()
@@ -676,13 +683,19 @@ def parse_args():
     return parser.parse_args()
 
 def init_run(name, config):
-    Model = \
+    '''
+    this isn't perfect because weight tying and the actual model architeture are independent
+    in principle, noshare should be some kind of mixin for maximum flexibility, but...
+    '''
+    
+    model = \
         Transformer if name.startswith('ar') \
         else PointerStyleEvolver if name.startswith('ps') \
         else NoShareEvolver if name.startswith('noshare') \
         else Evolver
-
-    model = Model(
+        
+    logger.info(f'using {model}')
+    model = model(
         d_model=config['d_model'],
         nhead=config['nhead'],
         dim_feedforward=config['dim_feedforward'],
@@ -699,7 +712,7 @@ def init_run(name, config):
         num_encoders=config.get('num_encoders', 1),
         num_decoders=config.get('num_decoders', 1),
         device=config['device']
-    ).to(device)
+    ).to(config['device'])
     
     optim = AdamW(model.parameters(), lr=config['lr'])
     
@@ -746,20 +759,26 @@ def init_run(name, config):
 
 def init_loaders(name, config):
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    kwargs = {'max_len': config['max_len'], 'tokenizer': tokenizer, 'batch_size': config['batch_size']}
+    sampler = StratifiedInfiniteSampler if 'num_epochs' not in config else InfiniteSampler
+    logger.info(f'using {sampler} in loader')
+    kwargs = {'max_len': config['max_len'], 'tokenizer': tokenizer, 'batch_size': config['batch_size'], 'sampler': sampler}
 
     if name.startswith('ar'):
+        logger.info('using ar loaders')
         train_dataset = SequenceDataset.from_trajectories(path=config['train'], denoising=True, **kwargs)
-        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=StratifiedInfiniteSampler(train_dataset, config['batch_size']))
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=sampler(train_dataset, config['batch_size']))
         eval_loader = (
             unsupervised_loader(path=config['eval'], **kwargs)
             if name.startswith('ar-d') else
             DataLoader(SequenceDataset.from_trajectories(path=config['eval'], denoising=True, **kwargs), batch_size=config['batch_size'], shuffle=True)
         )
-    elif name.split('-')[0] in {'sup', 'noshare', 'psn'}:
-        train_loader = supervised_loader(path=config['train'], cache_prefix=name.split('.')[0], all_tokens=config.get('all_tokens', True), **kwargs)
+    if 'sup' in name:
+        cache_prefix = config.get('cache_prefix', name.split('.')[0].split('_')[0])
+        logger.info(f'using supervised loaders with cache prefix {cache_prefix}')
+        train_loader = supervised_loader(path=config['train'], cache_prefix=cache_prefix, all_tokens=config.get('all_tokens', True), **kwargs)
         eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
     else:
+        logger.info('using unsupervised loaders')
         train_loader = unsupervised_loader(path=config['train'], **kwargs)
         eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
 
@@ -776,35 +795,40 @@ def main():
     prefix = parse_model_id(args.config)
     name = get_name(args.config)
     
-    model, optim, lr_scheduler, start_step = init_run(name, config)
     train_loader, eval_loader = init_loaders(name, config)
+    train_steps = config.get('train_steps', 0)
+    if train_steps == 0:
+        num_samples = len(train_loader.dataset)
+        train_steps = config.get('num_epochs', 1) * num_samples // config['batch_size']
+    config['train_steps']  = train_steps
+    logger.info(f'starting run for {train_steps} steps')
+    
+    model, optim, lr_scheduler, start_step = init_run(name, config)
     
     if prefix.startswith('ar'):
         train_ar(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
-            train_steps=config['train_steps'],
+            train_steps=train_steps,
             eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
             input_is_tgt=True,
-            device=args.device,
             name=name,
             start_step=start_step
         )  
    
-    if prefix.split('-')[0] in {'sup', 'noshare', 'psn'}:
+    if 'sup' in prefix:
         train_evolver(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
-            train_steps=config['train_steps'],
+            train_steps=train_steps,
             eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             clip_gradients=config['clip_gradients'],
             checkpoint_at=config['checkpoint_at'],
             eval_at=config['eval_at'],
-            device=args.device,
             start_step=start_step
         )
     
@@ -812,7 +836,7 @@ def main():
         train_evolver(
             model, optim, lr_scheduler,
             train_loader, eval_loader,
-            train_steps=config['train_steps'],
+            train_steps=train_steps,
             eval_steps=config['eval_steps'],
             grad_accum_steps=config['grad_accum_steps'],
             clip_gradients=config['clip_gradients'],
@@ -822,7 +846,6 @@ def main():
             threshold=config['threshold'],
             temperature=config['temperature'],
             resample_at=config['resample_at'],
-            device=args.device,
             start_step=start_step
         )
 

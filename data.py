@@ -65,25 +65,6 @@ def get_input_ids(trajectory, max_len, tokenizer):
         traj_input_ids.append(torch.cat([torch.tensor(seq), torch.full((max_len-n,), PAD_TOKEN_ID)]))
     return torch.stack(traj_input_ids)
     
-def sum_tokens(traj_input_ids):
-    return sum(torch.sum(traj[-1] != PAD_TOKEN_ID) for traj in traj_input_ids)
-    
-def collate_unsupervised(x):
-    traj_input_ids, log_probs = zip(*x)
-    toks = sum_tokens(traj_input_ids)
-    T = max(traj.shape[0] for traj in traj_input_ids)
-    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
-    log_probs = torch.tensor(log_probs)
-    return traj_input_ids, log_probs, None, toks
-
-def collate_supervised(x):
-    traj_input_ids, traj_edit_tgts = zip(*x)
-    toks = sum_tokens(traj_input_ids)
-    T = max(traj.shape[0] for traj in traj_input_ids)
-    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
-    traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
-    return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts))), toks
-    
 class TrajectoryDataset(Dataset):
     
     @classmethod
@@ -158,15 +139,34 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
                 tok_tgts,
                 F.one_hot(idx_tgts, self.max_len)
             )
+    
+def sum_tokens(traj_input_ids):
+    return sum(torch.sum(traj[-1] != PAD_TOKEN_ID) for traj in traj_input_ids)
+    
+def collate_unsupervised(x):
+    traj_input_ids, log_probs = zip(*x)
+    toks = sum_tokens(traj_input_ids)
+    T = max(traj.shape[0] for traj in traj_input_ids)
+    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
+    log_probs = torch.tensor(log_probs)
+    return traj_input_ids, log_probs, None, toks
+
+def collate_supervised(x):
+    traj_input_ids, traj_edit_tgts = zip(*x)
+    toks = sum_tokens(traj_input_ids)
+    T = max(traj.shape[0] for traj in traj_input_ids)
+    traj_input_ids = torch.stack([pad_traj_input_ids(traj, T) for traj in traj_input_ids])
+    traj_edit_tgts = [pad_traj_edit_tgts(tgts, T) for tgts in traj_edit_tgts]
+    return traj_input_ids, None, tuple(map(lambda x: torch.stack(x), zip(*traj_edit_tgts))), toks
             
-def supervised_loader(path, max_len, tokenizer, batch_size, cache_prefix, all_tokens, limit):
+def supervised_loader(path, max_len, tokenizer, batch_size, cache_prefix, all_tokens, sampler, limit=None):
     dataset = SupervisedTrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer, cache_prefix=cache_prefix, all_tokens=all_tokens, limit=limit) 
-    loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_supervised, pin_memory=True)
+    loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler(dataset, batch_size), collate_fn=collate_supervised, pin_memory=True)
     return loader
 
-def unsupervised_loader(path, max_len, tokenizer, batch_size, **_):
+def unsupervised_loader(path, max_len, tokenizer, batch_size, sampler, **_):
     dataset = TrajectoryDataset.from_disk(path=path, max_len=max_len, tokenizer=tokenizer)
-    loader = DataLoader(dataset, batch_size=batch_size, sampler=StratifiedInfiniteSampler(dataset, batch_size), collate_fn=collate_unsupervised)
+    loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler(dataset, batch_size), collate_fn=collate_unsupervised)
     return loader
     
 class SequenceDataset(Dataset):
@@ -208,6 +208,30 @@ class SequenceDataset(Dataset):
     def __getitem__(self, idx):
         return self.input_ids[idx], self.output_ids[idx]
     
+class InfiniteSampler(Sampler):
+    
+    def __init__(self, source, batch_size):
+        self.source = source
+        self.batch_size = batch_size
+        self.indices = list(range(len(source)))
+        self.N = len(source)
+        self.cur = 0
+        
+    def __iter__(self):
+        while True:
+            if self.cur >= self.N:
+                random.shuffle(self.indices)
+                self.cur = 0
+            
+            batch_end = min(self.cur + self.batch_size, self.N)
+            batch = self.indices[self.cur:batch_end]
+            self.cur = batch_end
+            
+            yield from batch
+    
+    def __len__(self):
+        return float('inf')
+    
 class StratifiedInfiniteSampler(Sampler):
     
     def __init__(self, source, batch_size):
@@ -223,14 +247,10 @@ class StratifiedInfiniteSampler(Sampler):
             for i in range(self.batch_size):
                 start = i * self.bucket_size
                 end = min((i+1) * self.bucket_size, self.num_samples)
-                if start >= end: break # edge case i'm too tired to fix
+                if start >= end: break
                 batch.append(random.randint(start, end - 1))
                 
-            # random.shuffle(batch)
             yield from batch
-    
-    def __len__(self):
-        return float('inf')
     
 ### logging utilities
 

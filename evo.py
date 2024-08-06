@@ -19,7 +19,7 @@ from transformers import BertTokenizer
 from tqdm import tqdm
 
 from const import *
-from run import sample_trajectory
+from run import sample_trajectory, apply_edits
 from utils import parse_model_id, get_name
 from embed import (
     SinusoidalEmbedding,
@@ -182,13 +182,11 @@ class Evolver(nn.Module):
         
         ins_mask = op_ids.eq(INS_ID)
         if torch.any(ins_mask):
-            ins_embeds = self.token_embedding(tok_ids[ins_mask]) * np.sqrt(self.d_model)
-            tgt[ins_mask] = ins_embeds
+            tgt[ins_mask] = self.token_embedding(tok_ids[ins_mask]) * np.sqrt(self.d_model)
             
         cpy_mask = op_ids.eq(CPY_ID)
         if torch.any(cpy_mask):
-            cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
-            tgt[cpy_mask] = permuted_memory[cpy_mask]
+            tgt[cpy_mask] = permuted_memory[cpy_mask.unsqueeze(-1).expand_as(tgt)]
         
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
@@ -201,7 +199,6 @@ class Evolver(nn.Module):
             tgt[eos_mask] = self.token_embedding.weight[self.eos_token_id] * np.sqrt(self.d_model)
         
         tgt = self.positional_embedding(tgt, d=1)
-        
         return tgt
     
     def get_src(self, x):
@@ -244,6 +241,10 @@ class Evolver(nn.Module):
         
         probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
         return probs, tgt, memory, cache
+   
+    # hacky to have polymorphism w/ subclasses 
+    def _ll(self, traj_input_ids):
+        return sample_trajectory(self, traj_input_ids, num_particles=1, temperature=0.5)[1]
     
     def loss(self, edit_probs, edit_tgts):
         return sum((
@@ -344,6 +345,57 @@ class PointerStyleEvolver(Evolver):
         )
         
         return probs, tgt, mem, cache
+    
+class PGNStyleEvolver(PointerStyleEvolver):
+    '''
+    changes:
+    - inherits changes from PointerStyleEvolver relative to baseline
+    - trained as a mixture distribution between vocab and previous seq tokens, i.e. p * ins + (1-p) * cpy
+    - can only be supervised with INS/CPY ops and treats EOS as INS(eos) or CPY(n)
+    - in the static embedding case, this is equivalent to an iterated PGN. otherwise, we use a pooling op over prev. occurrences
+    
+    problem:
+    - pooling should probably be weighted over the xattn weights
+    '''
+    
+    def compute_tgt(self, input_ids, edit_tgts, mem):
+        # we only use edit_tgts here to reconstruct output_ids
+        # this isn't perfect but it's a simple temp solution to use the same loader
+        output_ids = apply_edits(input_ids, edit_tgts)
+        
+        # to keep training fast, we just apply mean-pooling over previous occurrences
+        # a more principled approach would be to use idx_weights?
+        mem = self.positional_embedding(mem, d=-1)
+        mask = input_ids[:, :, None] == output_ids[:, None, :] # (B, N_in, N_out)
+        counts = mask.sum(1) # (B, N_out)
+    
+        tgt = (mem.unsqueeze(2) * mask.unsqueeze(-1)).sum(1) # (B, N_in, N_out, D) -> (B, N_out, D)
+        tgt = tgt / (counts.unsqueeze(-1) + 1e-10)
+        
+        ins_mask = counts.eq(0)
+        if torch.any(ins_mask):
+            tgt[ins_mask] = self.token_embedding(output_ids[counts == 0]) * np.sqrt(self.d_model)
+            
+        tgt = self.positional_embedding(tgt, d=1)
+        return tgt
+    
+    def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
+        if self.training and mem is not None: raise Exception()
+        if self.training and cache is not None: raise Exception()
+        
+        _src, src_pad_mask = self.get_src(input_ids)
+        src = _src if src is None else src
+        
+        encoder, decoder = self._get_codec(t)
+        mem = encoder(src, src_key_padding_mask=src_pad_mask) if mem is None else mem
+        tgt = self.compute_tgt(input_ids, edit_tgts, mem)
+        
+    def step(self, traj_input_ids, traj_edit_tgts):
+        # should return traj_loss and [0, traj_loss, 0]
+        pass
+    
+    def _ll(self, traj_input_ids):
+        pass
     
 class Transformer(nn.Module):
     '''
@@ -552,7 +604,7 @@ def evolver_elbo(evolver, eval_loader, eval_steps):
         if step >= eval_steps: break
         traj_input_ids = traj_input_ids.to(evolver.device)
         post = post.to(evolver.device)
-        _, ll = sample_trajectory(evolver, traj_input_ids, num_particles=1, temperature=0.5)
+        ll = evolver._ll(traj_input_ids)
         loss += torch.sum(ll - post)
         toks += n
     return loss / toks
@@ -668,14 +720,10 @@ def parse_args():
     return parser.parse_args()
 
 def init_run(name, config):
-    '''
-    this isn't perfect because weight tying and the actual model architeture are independent
-    in principle, noshare should be some kind of mixin for maximum flexibility, but...
-    '''
-    
     model = \
         Transformer if name.startswith('ar') \
         else PointerStyleEvolver if name.startswith('ps') \
+        else PGNStyleEvolver if name.startswith('pgn') \
         else Evolver
         
     logger.info(f'using {model}')

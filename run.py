@@ -38,8 +38,6 @@ def sample_trajectory(
     traj_idx_tgts = torch.zeros(B, T-1, N, N, device=device)
 
     for t in range(T-1):
-        # print(f'\n### new trajectory step {i}')
-        
         edit_tgts, src, log_prob = particle_filter(
             evolver, traj_input_ids[:, t], traj_input_ids[:, t+1],
             src, t, traj_pad_mask[:, t, :], traj_pad_mask[:, t+1, :],
@@ -170,7 +168,6 @@ def particle_filter(
         sample_weight = posterior_probs - proposal_probs
         
         # C[i, j] = one_hot(B[i, A[i, j]]])
-        # can we make this update faster?
         fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
        
         update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))
@@ -184,12 +181,6 @@ def particle_filter(
         ens_toks[eos, :, i, PAD_TOKEN_ID] = 1
         ens_idxs[eos, :, i, 0] = 1
         weights[eos] += op_probs[eos, :, -1, EOS_ID]
-        
-        # if torch.any(update):
-        #     print('STEP', i, 'SAMPLED', samples.item())
-        #     print('INS PROB', op_probs[:, :, -1, INS_ID].item(), 'CPY PROB', op_probs[:, :, -1, CPY_ID].item())
-        #     print('TOKEN PROB', tok_probs[torch.arange(B), :, -1, forced].item())
-        #     print('WEIGHT DIFF', posterior_probs[update].item(), '-', proposal_probs[update].item(), '=', sample_weight[update].item())
         
         if M == 1: continue
         

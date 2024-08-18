@@ -30,6 +30,8 @@ from trans import (
     TransformerEncoderLayer,
     AdaptiveTransformerEncoderLayer,
     TransformerEncoder,
+    TransformerDecoderLayer,
+    TransformerDecoder,
     CausalTransformerDecoderLayer,
     CausalTransformerDecoder,
     MultiheadPointer
@@ -227,11 +229,11 @@ class Evolver(nn.Module):
         if self.training and cache is not None: raise Exception()
         
         _src, pad_mask = self.get_src(input_ids)
-        src = _src if src is None else src
+        src = src or _src
         
         encoder, decoder = self._get_codec(t)
         depth_embed = self.depth_embedding(torch.full((B,), t, device=self.device)) if self.depth_embedding else None
-        memory = encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask) if memory is None else memory
+        memory = memory or encoder(src, depth_embed=depth_embed, src_key_padding_mask=pad_mask)
         tgt = self.compute_tgt_static(input_ids, edit_tgts) if self.static_embeddings else self.compute_tgt(input_ids, edit_tgts, memory)
         output, _, cache = decoder(tgt, memory, cache=cache, memory_key_padding_mask=pad_mask)
         
@@ -242,10 +244,6 @@ class Evolver(nn.Module):
         probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
         return probs, tgt, memory, cache
    
-    # hacky to have polymorphism w/ subclasses 
-    def _ll(self, traj_input_ids):
-        return sample_trajectory(self, traj_input_ids, num_particles=1, temperature=0.5)[1]
-    
     def loss(self, edit_probs, edit_tgts):
         return sum((
             xent(p[:, :-1], t[:, 1:], ignore=i)
@@ -279,8 +277,27 @@ class Evolver(nn.Module):
             (tot[2] / n[2] * self.idx_scale)
         )
     
-        N = torch.sum(~(traj_input_ids.eq(PAD_TOKEN_ID)[:, 1:, :])) 
-        return traj_loss, tot[0] / N, tot[1] / N, tot[2] / N
+        return traj_loss
+    
+    def prepare_batch(self, batch, step=None, **pf_params):
+        traj_input_ids, _, traj_edit_tgts, _ = batch 
+        traj_input_ids = traj_input_ids.to(self.device)
+        
+        if traj_edit_tgts is not None:
+            traj_edit_tgts = tuple(map(lambda x: x.to(self.device), traj_edit_tgts))
+        else:
+            s = time.time()
+            self.eval()
+            traj_edit_tgts, _ = sample_trajectory(self, traj_input_ids, **pf_params)
+            log({'train/e_time': time.time()-s}, step=step)
+            
+        return traj_input_ids, traj_edit_tgts
+    
+    def _ll(self, traj_input_ids):
+        return sample_trajectory(self, traj_input_ids, num_particles=1, temperature=0.5)[1]
+    
+    def run_eval(self, eval_loader, eval_steps):
+        return elbo(self, eval_loader, eval_steps) 
     
 class PointerStyleEvolver(Evolver):
     '''
@@ -380,21 +397,6 @@ class PGNStyleEvolver(PointerStyleEvolver):
         return tgt
     
     def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
-        if self.training and mem is not None: raise Exception()
-        if self.training and cache is not None: raise Exception()
-        
-        _src, src_pad_mask = self.get_src(input_ids)
-        src = _src if src is None else src
-        
-        encoder, decoder = self._get_codec(t)
-        mem = encoder(src, src_key_padding_mask=src_pad_mask) if mem is None else mem
-        tgt = self.compute_tgt(input_ids, edit_tgts, mem)
-        
-    def step(self, traj_input_ids, traj_edit_tgts):
-        # should return traj_loss and [0, traj_loss, 0]
-        pass
-    
-    def _ll(self, traj_input_ids):
         pass
     
 class Transformer(nn.Module):
@@ -415,7 +417,9 @@ class Transformer(nn.Module):
         max_len=512,
         vocab_size=VOCAB_SIZE,
         pad_token_id=PAD_TOKEN_ID,
-        device='cpu', **_
+        device='cpu',
+        name=None,
+        **_
     ):
         super().__init__()
         
@@ -428,13 +432,14 @@ class Transformer(nn.Module):
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         self.device = device
+        self.name = name
       
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len)
         self.token_embedding = nn.Embedding(self.vocab_size, self.d_model)
         self.tok_head = nn.Linear(self.d_model, self.vocab_size)
         self.tok_head.weight = self.token_embedding.weight # weight tying
         
-        codec_params = {
+        self.codec_params = {
             'd_model': d_model,
             'nhead': nhead,
             'dropout': dropout,
@@ -442,65 +447,125 @@ class Transformer(nn.Module):
             'batch_first': True,
         }
      
-        encoder_layer = nn.TransformerEncoderLayer(**codec_params)
+        encoder_layer = nn.TransformerEncoderLayer(**self.codec_params)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         
-        decoder_layer = nn.TransformerDecoderLayer(**codec_params)
+        decoder_layer = nn.TransformerDecoderLayer(**self.codec_params)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
         
-    def get_src(self, x):
+    def embed(self, x):
         pad_mask = x.eq(self.pad_token_id)
         x = self.token_embedding(x) * np.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x, pad_mask
     
-    def forward(
-        self,
-        src, tgt,
-        src_pad_mask,
-        tgt_pad_mask,
-    ):
-        if self.encoder_layers == 0 and src is not None:
-            raise Exception('src found when encoder_layers == 0')
-        
-        causal_mask = T.generate_square_subsequent_mask(self.max_len, self.device).eq(-torch.inf)
+    def forward(self, input_ids, output_ids):
+        src, src_pad_mask = self.embed(input_ids)
+        tgt, tgt_pad_mask = self.embed(output_ids)
+        causal_mask = T.generate_square_subsequent_mask(self.max_len, self.device, dtype=torch.bool)
        
-        output = self.encoder(
+        h = self.encoder(
             src,
-            is_causal=(self.decoder_layers == 0),
-            mask=None if (self.decoder_layers > 0) else causal_mask,
+            is_causal=self.decoder_layers == 0,
+            mask=None if self.decoder_layers else causal_mask,
             src_key_padding_mask=src_pad_mask
         )
         
         if self.decoder_layers > 0:
-            output = self.decoder(
-                tgt, output,
-                tgt_is_causal=True,
+            h = self.decoder(
+                tgt, h,
                 tgt_mask=causal_mask,
                 tgt_key_padding_mask=tgt_pad_mask,
-                memory_is_causal=False,
-                memory_mask=None,
                 memory_key_padding_mask=src_pad_mask
             )
         
-        tok_logits = self.tok_head(output)
+        tok_logits = self.tok_head(h)
         tok_probs = F.log_softmax(tok_logits, dim=-1)
+        
         return tok_probs
     
-    def loss(self, input_ids, output_ids=None):
-        src, src_pad_mask = self.get_src(input_ids)
+class DenoisingTransformer(Transformer):
+    '''
+    Standard autoregressive denoising transformer, except we build in explicit
+    "message passing" through cross-attention over the previous timestep's sequence
+    '''
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         
-        if output_ids is None:
-            tok_probs = self.forward(src, None, src_pad_mask, None)
-            labels = F.one_hot(input_ids[:, 1:], num_classes=self.vocab_size)
+        if self.encoder_layers == 0:
+            raise Exception('denoising transformer requires > 0 encoder layers')
         
-        else:
-            tgt, tgt_pad_mask = self.get_src(output_ids)
-            tok_probs = self.forward(src, tgt, src_pad_mask, tgt_pad_mask)
-            labels = F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size)
-       
-        return xent(tok_probs[:, :-1], labels, ignore=self.pad_token_id)
-
+        # note the name mismatch here
+        encoder_layer = TransformerDecoderLayer(**self.codec_params)
+        self.encoder = TransformerDecoder(encoder_layer, num_layers=self.encoder_layers)
+        
+    def forward(
+        self, input_ids, output_ids,
+        prev_mem=None, prev_mask=None,
+    ):
+        B, N = input_ids.shape
+        src, src_pad_mask = self.embed(input_ids)
+        tgt, tgt_pad_mask = self.embed(output_ids)
+        
+        mem = self.encoder(
+            src, prev_mem,
+            tgt_key_padding_mask=src_pad_mask,
+            memory_key_padding_mask=prev_mask
+        )[0]
+        
+        h = self.decoder(
+            tgt, mem,
+            tgt_mask=T.generate_square_subsequent_mask(N, device=self.device, dtype=torch.bool),
+            tgt_key_padding_mask=tgt_pad_mask,
+            memory_key_padding_mask=src_pad_mask
+        )
+        
+        l = self.tok_head(h)
+        l = F.log_softmax(l, dim=-1)
+        
+        return l, mem, src_pad_mask
+    
+    def prepare_batch(self, batch, *_):
+        traj_input_ids, *_ = batch
+        return traj_input_ids.to(self.device)
+    
+    def step(self, batch, reduce=True):
+        traj_input_ids = batch
+        
+        traj_loss = 0
+        prev_mem = None
+        prev_mask = None
+        
+        for t in range(traj_input_ids.shape[1]-1):
+            input_ids = traj_input_ids[:, t]
+            output_ids = traj_input_ids[:, t+1]
+            
+            tok_probs, prev_mem, prev_mask = self.forward(
+                input_ids, output_ids,
+                prev_mem, prev_mask
+            )
+            
+            loss = xent(
+                tok_probs[:, :-1],
+                F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
+                ignore=self.pad_token_id
+            )[0]
+            
+            traj_loss += loss
+            
+        if reduce:
+            N = torch.sum(~(traj_input_ids.eq(self.pad_token_id)[:, 1:, :]))
+            return traj_loss / N
+        
+        return traj_loss
+    
+    def _ll(self, traj_input_ids):
+        return -self.step(traj_input_ids, reduce=False)
+    
+    def run_eval(self, eval_loader, eval_steps):
+        return elbo(self, eval_loader, eval_steps)
+            
 if torch.cuda.is_available():
     device = torch.cuda.current_device()
     gpu_properties = torch.cuda.get_device_properties(device)
@@ -524,14 +589,6 @@ def record_grad_norms(evolver, step):
         'train/idx_grad_norm': grad_norm(evolver.idx_head)
     }, step=step)
     
-def record_train_loss(ls, step):
-    log({
-        'train/total_loss': sum(ls),
-        'train/op_loss': ls[0],
-        'train/tok_loss': ls[1],
-        'train/idx_loss': ls[2],
-    }, step=step)
-    
 def checkpoint_model(model, optim, lr_scheduler, step):
     save_path = REMOTE_PREFIX if model.device == 'cuda' else '.'
     torch.save({
@@ -542,173 +599,53 @@ def checkpoint_model(model, optim, lr_scheduler, step):
         'wandb_run_id': None if wandb.run is None else wandb.run.id
     }, f'{save_path}/checkpoints/{model.name}-{step+1}.pt')
 
-def train_evolver(
-    evolver, optim, lr_scheduler, train_loader, eval_loader,
-    train_steps, eval_steps, grad_accum_steps, clip_gradients,
-    checkpoint_at, eval_at,
-    num_particles=None, threshold=None, temperature=1.0, resample_at=1,
-    start_step=0
-):
-    pf_params = {
-        'num_particles': num_particles,
-        'threshold': threshold,
-        'temperature': temperature,
-        'resample_at': resample_at
-    } 
-    
-    for step, (traj_input_ids, _, traj_edit_tgts, _) in tqdm(
-        enumerate(train_loader, start=start_step),
-        total=train_steps
-    ):
-        if step >= train_steps: break
-        traj_input_ids = traj_input_ids.to(evolver.device)
-        
-        # E-step
-        if traj_edit_tgts is not None:
-            traj_edit_tgts = tuple(map(lambda x: x.to(evolver.device), traj_edit_tgts))
-        else:
-            s = time.time()
-            evolver.eval()
-            traj_edit_tgts, _ = sample_trajectory(evolver, traj_input_ids, **pf_params)
-            log({'train/e_time': time.time()-s}, step=step)
-            
-        # M-step
-        evolver.train()
-        traj_loss, *ls = evolver.step(traj_input_ids, traj_edit_tgts, step=step)
-        traj_loss.backward()
-        
-        record_grad_norms(evolver, step)
-        record_train_loss(ls, step)
-        
-        if step % grad_accum_steps == 0:
-            optim.step()
-            optim.zero_grad()
-            
-        if lr_scheduler:
-            lr_scheduler.step()
-        
-        if (step + 1) % checkpoint_at == 0:
-            checkpoint_model(evolver, optim, lr_scheduler, step) 
-            
-        if (step + 1) % eval_at == 0:
-            s = time.time()
-            evolver.eval()
-            eval_loss = evolver_elbo(evolver, eval_loader, eval_steps)
-            log({'eval/loss': eval_loss, 'eval/time': time.time()-s}, step=step)
-
 @torch.no_grad()
-def evolver_elbo(evolver, eval_loader, eval_steps):
+def elbo(model, eval_loader, eval_steps):
     loss = 0
     toks = 0
     for step, (traj_input_ids, post, _, n) in enumerate(eval_loader):
         if step >= eval_steps: break
-        traj_input_ids = traj_input_ids.to(evolver.device)
-        post = post.to(evolver.device)
-        ll = evolver._ll(traj_input_ids)
+        traj_input_ids = traj_input_ids.to(model.device)
+        post = post.to(model.device)
+        ll = model._ll(traj_input_ids)
         loss += torch.sum(ll - post)
         toks += n
     return loss / toks
 
-def train_ar(
-    model, optim, lr_scheduler,
-    train_loader, eval_loader,
-    train_steps, eval_steps, grad_accum_steps,
-    checkpoint_at, eval_at,
-    device, name,
-    start_step, input_is_tgt
+def train(
+    model, optim, lr_scheduler, train_loader, eval_loader,
+    train_steps, eval_steps, grad_accum_steps, clip_gradients,
+    checkpoint_at, eval_at, pf_params, start_step=0
 ):
-    for step, (input_ids, output_ids) in tqdm(
-        enumerate(train_loader, start=start_step),
-        total=train_steps
-    ):
-        if step == train_steps: break
+    '''
+    model needs to implement:
+    - prepare_batch(self, batch, step, pf_params)
+    - step(self, inputs, step)
+    - run_eval(self, eval_loader, eval_steps)
+    '''
+    
+    for step, batch in tqdm(enumerate(train_loader, start=start_step), total=train_steps):
+        if step >= train_steps: break
 
-        input_ids = input_ids.to(device)
-        output_ids = output_ids.to(device)
-       
-        model.train() 
-        if input_is_tgt: tot_loss, n = model.loss(output_ids)
-        else: tot_loss, n = model.loss(input_ids, output_ids)
-        loss = tot_loss / n 
+        batch = model.prepare_batch(batch, step, pf_params)
+        loss = model.step(batch, step)
         loss.backward()
-        
-        if (step + 1) % grad_accum_steps == 0:
+
+        if step % grad_accum_steps == 0:
             optim.step()
             optim.zero_grad()
-           
-        if lr_scheduler: 
+
+        if lr_scheduler:
             lr_scheduler.step()
-       
-        log({'train/total_loss': loss.item()}, step=step)
-        
+
         if (step + 1) % checkpoint_at == 0:
-            save_path = f'{REMOTE_PREFIX}/checkpoints' if device == 'cuda' else 'checkpoints'
-            torch.save({
-                'step': step,
-                'model': model.state_dict(),
-                'optim': optim.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'wandb_run_id': None if wandb.run is None else wandb.run.id
-            }, f'{save_path}/{name}-{step+1}.pt')
-            
+            checkpoint_model(model, optim, lr_scheduler, step)
+
         if (step + 1) % eval_at == 0:
-            if isinstance(eval_loader.dataset, TrajectoryDataset):
-                eval_loss = ar_elbo(model, eval_loader, eval_steps, device)
-            elif isinstance(eval_loader.dataset, SequenceDataset):
-                eval_loss = ar_likelihood(model, eval_loader, eval_steps, input_is_tgt, device)
-            log({'eval/loss': eval_loss.item()}, step=step)
-
-@torch.no_grad()
-def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
-    model.eval()
-    tot_loss = 0
-    tot_n = 0
-    
-    for step, (traj_input_ids, log_posterior, _, n) in enumerate(eval_loader):
-        if step >= eval_steps: break
-        
-        traj_input_ids = traj_input_ids.to(device)
-        log_posterior = log_posterior.to(device)
-        
-        log_likelihood = traj_likelihood(model, traj_input_ids)
-        tot_loss += log_likelihood - torch.sum(log_posterior)
-        tot_n += n
-       
-    return tot_loss / tot_n
-
-def traj_likelihood(model, traj_input_ids): 
-    _, T, _ = traj_input_ids.shape
-    tot_loss = tot_n = 0
-    
-    for i in range(T-1):
-        input_ids = traj_input_ids[:, i]
-        output_ids = traj_input_ids[:, i+1]
-        
-        loss, _ = model.loss(input_ids, output_ids)
-        tot_loss += loss
-        
-    return -tot_loss
-
-@torch.no_grad()
-def ar_likelihood(model, eval_loader: SequenceDataset, eval_steps, input_is_tgt, device):
-    model.eval()
-    tot_loss = 0
-    tot_n = 0
-    
-    for step, (input_ids, output_ids) in enumerate(eval_loader):
-        if step >= eval_steps: break
-    
-        input_ids = input_ids.to(device)
-        output_ids = output_ids.to(device)
-        
-        if input_is_tgt: loss, n = model.loss(output_ids)
-        else: loss, n = model.loss(input_ids, output_ids)
-        
-        tot_loss += loss
-        tot_n += n
-            
-    eval_loss = tot_loss / tot_n
-    return -eval_loss
+            s = time.time()
+            model.eval()
+            eval_loss = model.run_eval(eval_loader, eval_steps)
+            log({'eval/loss': eval_loss, 'eval/time': time.time() - s}, step=step)
             
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -722,6 +659,7 @@ def parse_args():
 def init_run(name, config):
     model = \
         Transformer if name.startswith('ar') \
+        else DenoisingTransformer if name.startswith('den') \
         else PointerStyleEvolver if name.startswith('ps') \
         else PGNStyleEvolver if name.startswith('pgn') \
         else Evolver
@@ -806,14 +744,14 @@ def init_loaders(name, config):
             if name.startswith('ar-d') else
             DataLoader(SequenceDataset.from_trajectories(path=config['eval'], denoising=True, **kwargs), batch_size=config['batch_size'], shuffle=True)
         )
-    if 'sup' in name:
+    elif 'unsup' in name or name.startswith('den'):
+        logger.info('using unsupervised loaders')
+        train_loader = unsupervised_loader(path=config['train'], **kwargs)
+        eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
+    else:
         cache_prefix = config.get('cache_prefix', name.split('.')[0].split('_')[0])
         logger.info(f'using supervised loaders with cache prefix {cache_prefix}')
         train_loader = supervised_loader(path=config['train'], cache_prefix=cache_prefix, all_tokens=config.get('all_tokens', True), **kwargs)
-        eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
-    else:
-        logger.info('using unsupervised loaders')
-        train_loader = unsupervised_loader(path=config['train'], **kwargs)
         eval_loader = unsupervised_loader(path=config['eval'], **kwargs)
 
     return train_loader, eval_loader
@@ -842,57 +780,136 @@ def main():
     logger.info(f'eval every {config["eval_at"]} steps')
         
     if config['checkpoint_at'] < 1:
-         config['checkpoint_at'] = int(train_steps * config['checkpoint_at'])
+        config['checkpoint_at'] = int(train_steps * config['checkpoint_at'])
     logger.info(f'checkpoint every {config["checkpoint_at"]} steps')
     
     model, optim, lr_scheduler, start_step = init_run(name, config)
-    
-    if prefix.startswith('ar'):
-        train_ar(
-            model, optim, lr_scheduler,
-            train_loader, eval_loader,
-            train_steps=train_steps,
-            eval_steps=config['eval_steps'],
-            grad_accum_steps=config['grad_accum_steps'],
-            checkpoint_at=config['checkpoint_at'],
-            eval_at=config['eval_at'],
-            input_is_tgt=True,
-            name=name,
-            start_step=start_step
-        )  
    
-    if 'sup' in prefix:
-        train_evolver(
-            model, optim, lr_scheduler,
-            train_loader, eval_loader,
-            train_steps=train_steps,
-            eval_steps=config['eval_steps'],
-            grad_accum_steps=config['grad_accum_steps'],
-            clip_gradients=config['clip_gradients'],
-            checkpoint_at=config['checkpoint_at'],
-            eval_at=config['eval_at'],
-            start_step=start_step
-        )
+    pf_params = None if 'unsup' not in prefix else {
+        'num_particles': config['num_particles'],
+        'threshold': config['threshold'],
+        'temperature': config['temperature'],
+        'resample_at': config['resample_at'],
+    }
     
-    else:
-        train_evolver(
-            model, optim, lr_scheduler,
-            train_loader, eval_loader,
-            train_steps=train_steps,
-            eval_steps=config['eval_steps'],
-            grad_accum_steps=config['grad_accum_steps'],
-            clip_gradients=config['clip_gradients'],
-            checkpoint_at=config['checkpoint_at'],
-            eval_at=config['eval_at'],
-            num_particles=config['num_particles'],
-            threshold=config['threshold'],
-            temperature=config['temperature'],
-            resample_at=config['resample_at'],
-            start_step=start_step
-        )
-       
-    # get a final checkpoint
+    train(
+        model, optim, lr_scheduler,
+        train_loader, eval_loader,
+        train_steps=train_steps,
+        eval_steps=config['eval_steps'],
+        grad_accum_steps=config['grad_accum_steps'],
+        clip_gradients=config['clip_gradients'],
+        checkpoint_at=config['checkpoint_at'],
+        eval_at=config['eval_at'],
+        pf_params=pf_params,
+        start_step=start_step
+    )
+    
     checkpoint_model(model, optim, lr_scheduler, None)
 
 if __name__ == '__main__':
     main()
+
+### broken/deprecated ATM
+
+def train_ar(
+    model, optim, lr_scheduler,
+    train_loader, eval_loader,
+    train_steps, eval_steps, grad_accum_steps,
+    checkpoint_at, eval_at,
+    device, name,
+    start_step, input_is_tgt
+):
+    for step, (input_ids, output_ids) in tqdm(
+        enumerate(train_loader, start=start_step),
+        total=train_steps
+    ):
+        if step == train_steps: break
+
+        input_ids = input_ids.to(device)
+        output_ids = output_ids.to(device)
+       
+        model.train() 
+        if input_is_tgt: tot_loss, n = model.step(output_ids)
+        else: tot_loss, n = model.step(input_ids, output_ids)
+        loss = tot_loss / n 
+        loss.backward()
+        
+        if (step + 1) % grad_accum_steps == 0:
+            optim.step()
+            optim.zero_grad()
+           
+        if lr_scheduler: 
+            lr_scheduler.step()
+       
+        log({'train/total_loss': loss.item()}, step=step)
+        
+        if (step + 1) % checkpoint_at == 0:
+            save_path = f'{REMOTE_PREFIX}/checkpoints' if device == 'cuda' else 'checkpoints'
+            torch.save({
+                'step': step,
+                'model': model.state_dict(),
+                'optim': optim.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'wandb_run_id': None if wandb.run is None else wandb.run.id
+            }, f'{save_path}/{name}-{step+1}.pt')
+            
+        if (step + 1) % eval_at == 0:
+            if isinstance(eval_loader.dataset, TrajectoryDataset):
+                eval_loss = ar_elbo(model, eval_loader, eval_steps, device)
+            elif isinstance(eval_loader.dataset, SequenceDataset):
+                eval_loss = ar_likelihood(model, eval_loader, eval_steps, input_is_tgt, device)
+            log({'eval/loss': eval_loss.item()}, step=step)
+
+@torch.no_grad()
+def ar_elbo(model, eval_loader: TrajectoryDataset, eval_steps, device):
+    model.eval()
+    tot_loss = 0
+    tot_n = 0
+    
+    for step, (traj_input_ids, log_posterior, _, n) in enumerate(eval_loader):
+        if step >= eval_steps: break
+        
+        traj_input_ids = traj_input_ids.to(device)
+        log_posterior = log_posterior.to(device)
+        
+        # log_likelihood = traj_likelihood(model, traj_input_ids)
+        ll = model.step(traj_input_ids)
+        tot_loss += ll - torch.sum(log_posterior)
+        tot_n += n
+       
+    return tot_loss / tot_n
+
+def traj_likelihood(model, traj_input_ids): 
+    _, T, _ = traj_input_ids.shape
+    tot_loss = tot_n = 0
+    
+    for i in range(T-1):
+        input_ids = traj_input_ids[:, i]
+        output_ids = traj_input_ids[:, i+1]
+        
+        loss, _ = model.loss(input_ids, output_ids)
+        tot_loss += loss
+        
+    return -tot_loss
+
+@torch.no_grad()
+def ar_likelihood(model, eval_loader: SequenceDataset, eval_steps, input_is_tgt, device):
+    model.eval()
+    tot_loss = 0
+    tot_n = 0
+    
+    for step, (input_ids, output_ids) in enumerate(eval_loader):
+        if step >= eval_steps: break
+    
+        input_ids = input_ids.to(device)
+        output_ids = output_ids.to(device)
+        
+        if input_is_tgt: loss, n = model.loss(output_ids)
+        else: loss, n = model.loss(input_ids, output_ids)
+        
+        tot_loss += loss
+        tot_n += n
+            
+    eval_loss = tot_loss / tot_n
+    return -eval_loss

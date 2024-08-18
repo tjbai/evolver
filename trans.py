@@ -88,11 +88,12 @@ class TransformerDecoderLayer(nn.Module):
     
     def __init__(
         self,
-        d_model,
-        nhead,
-        dim_feedforward,
-        dropout,
-        layer_norm_eps
+        d_model=512,
+        nhead=8,
+        dim_feedforward=2048,
+        dropout=0.1,
+        layer_norm_eps=1e-5,
+        **_
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True, bias=True)
@@ -119,12 +120,16 @@ class TransformerDecoderLayer(nn.Module):
         tgt_is_causal=False, memory_is_causal=False
     ):
         x = tgt
-        
+       
         res = self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal)
         x = self.ln_1(x + res)
         
-        res, attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal)
-        x = self.ln_2(x + res)
+        if mem is not None: 
+            res, attn_weights = self._xa_block(x, mem, memory_mask, memory_key_padding_mask, memory_is_causal)
+            x = self.ln_2(x + res)
+        else:
+            attn_weights = None
+            x = self.ln_2(x)
         
         res = self._ff_block(x)
         x = self.ln_3(x + res)

@@ -543,7 +543,9 @@ class DenoisingTransformer(Transformer):
             
             tok_probs, prev_mem, prev_mask = self.forward(
                 input_ids, output_ids,
-                prev_mem, prev_mask
+                # prev_mem, prev_mask
+                # NOTE -- experiment
+                None, None
             )
             
             loss = xent(

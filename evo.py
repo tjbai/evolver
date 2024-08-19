@@ -52,7 +52,7 @@ REMOTE_PREFIX = os.environ.get('REMOTE_PREFIX', '/scratch4/jeisner1')
 
 def log(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
-    else: print(f"Step {step}: {data}")
+    else: logger.info(f"step {step}: {data}")
 
 def timing(f):
     @wraps(f)
@@ -60,7 +60,7 @@ def timing(f):
         ts = time()
         result = f(*args, **kw)
         te = time()
-        print(f'{f.__name__}: {te-ts}') 
+        logger.info(f'{f.__name__}: {te-ts}') 
         return result
     return wrap
 
@@ -188,7 +188,8 @@ class Evolver(nn.Module):
             
         cpy_mask = op_ids.eq(CPY_ID)
         if torch.any(cpy_mask):
-            tgt[cpy_mask] = permuted_memory[cpy_mask.unsqueeze(-1).expand_as(tgt)]
+            cpy_mask = cpy_mask.unsqueeze(-1).expand_as(tgt)
+            tgt[cpy_mask] = permuted_memory[cpy_mask]
         
         sub_mask = op_ids.eq(SUB_ID)
         if torch.any(sub_mask):
@@ -250,7 +251,8 @@ class Evolver(nn.Module):
             for p, t, i in zip(edit_probs, edit_tgts, [PAD_ID, PAD_TOKEN_ID, 0]
         )), ())
 
-    def step(self, traj_input_ids, traj_edit_tgts, step=None):
+    def step(self, batch, step=None):
+        traj_input_ids, traj_edit_tgts = batch
         _, T, _ = traj_input_ids.shape
         tot, n = [0, 0, 0], [0, 0, 0]
        
@@ -279,8 +281,8 @@ class Evolver(nn.Module):
     
         return traj_loss
     
-    def prepare_batch(self, batch, step=None, **pf_params):
-        traj_input_ids, _, traj_edit_tgts, _ = batch 
+    def prepare_batch(self, batch, step, pf_params):
+        traj_input_ids, _, traj_edit_tgts, _ = batch
         traj_input_ids = traj_input_ids.to(self.device)
         
         if traj_edit_tgts is not None:
@@ -338,6 +340,10 @@ class PointerStyleEvolver(Evolver):
         return self.op_head(torch.cat([c, tgt, h], dim=-1))
         
     def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
+        '''
+        in a sense this implements the evolver interface by returning a distribution over op/tok/idx
+        ''' 
+        
         if self.training and mem is not None: raise Exception() 
         if self.training and cache is not None: raise Exception()
         
@@ -571,7 +577,7 @@ class DenoisingTransformer(Transformer):
 if torch.cuda.is_available():
     device = torch.cuda.current_device()
     gpu_properties = torch.cuda.get_device_properties(device)
-    print(f'RUNNING ON: {gpu_properties.name}')
+    logger.info(f'RUNNING ON: {gpu_properties.name}')
 
 def get_memory():
     return torch.cuda.memory_allocated() / 1024**2
@@ -599,7 +605,7 @@ def checkpoint_model(model, optim, lr_scheduler, step):
         'optim': optim.state_dict(),
         'lr_scheduler': lr_scheduler.state_dict(),
         'wandb_run_id': None if wandb.run is None else wandb.run.id
-    }, f'{save_path}/checkpoints/{model.name}-{step+1}.pt')
+    }, f'{save_path}/checkpoints/{model.name}-{(step or -1)+1}.pt')
 
 @torch.no_grad()
 def elbo(model, eval_loader, eval_steps):
@@ -628,8 +634,9 @@ def train(
     
     for step, batch in tqdm(enumerate(train_loader, start=start_step), total=train_steps):
         if step >= train_steps: break
-
+        
         batch = model.prepare_batch(batch, step, pf_params)
+        model.train() 
         loss = model.step(batch, step)
         loss.backward()
 

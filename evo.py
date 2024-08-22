@@ -490,6 +490,37 @@ class Transformer(nn.Module):
         
         return tok_probs
     
+    def prepare_batch(self, batch, *_):
+        input_ids, output_ids = batch
+        return input_ids.to(self.device), output_ids.to(self.device)
+    
+    def step(self, inputs, _):
+        input_ids, output_ids = inputs
+        tok_probs = self.forward(input_ids, output_ids)
+        loss, n = xent(
+            tok_probs[:, :-1],
+            F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
+            ignore=self.pad_token_id
+        )
+        return loss / n
+    
+    def _ll(self, traj_input_ids):
+        tl = 0
+        for t in range(traj_input_ids.shape[1]-1):
+            input_ids = traj_input_ids[:, t]
+            output_ids = traj_input_ids[:, t+1]
+            tok_probs = self.forward(input_ids, output_ids)
+            ll = xent(
+                tok_probs[:, :-1],
+                F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
+                ignore=self.pad_token_id
+            )[0]
+            tl -= ll
+        return tl
+    
+    def run_eval(self, eval_loader, eval_steps):
+        return elbo(self, eval_loader, eval_steps)
+    
 class DenoisingTransformer(Transformer):
     '''
     Standard autoregressive denoising transformer, except we build in explicit

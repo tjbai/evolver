@@ -191,7 +191,7 @@ class SequenceDataset(Dataset):
                     
         return cls(inputs, outputs, **kwargs)
     
-    def __init__(self, inputs, outputs, max_len, tokenizer, limit=None):
+    def __init__(self, inputs, outputs, max_len, tokenizer, limit=None, **_):
         assert len(inputs) == len(outputs), 'length mismatch'
        
         s = time.time()

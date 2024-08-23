@@ -363,8 +363,12 @@ class PointerStyleEvolver(Evolver):
 
         op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
         tok_logits = self.tok_head(h)
-       
-        idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
+        
+        # what if we just cheated?
+        # pointer gets to use raw positional embeddings as keys?
+        ## NOTE -- REVERT
+        cheating_tgt = self.positional_embedding(torch.zeros_like(tgt, device=self.device), d=1)
+        idx_weights = self.pointer(cheating_tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
         idx_logits = self._to_idx_logits(idx_weights)
         
         probs =  (

@@ -20,6 +20,5 @@
     "checkpoint_at": 500,
     "eval_at": 20,
 
-    "pointer_attn": true,
-    "positional_embeddings": "identity"
+    "pointer_attn": true
 }

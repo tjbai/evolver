@@ -44,7 +44,8 @@ from data import (
     StratifiedInfiniteSampler,
     InfiniteSampler,
     unsupervised_loader,
-    supervised_loader
+    supervised_loader,
+    elaborate
 )
 
 logging.basicConfig()
@@ -333,6 +334,9 @@ class PointerStyleEvolver(Evolver):
                 add_bias_kv=False,
                 add_zero_attn=False
             )
+           
+        # NOTE -- cheating again, revert 
+        self.idx_ffn = nn.Linear(self.d_model, self.max_len)
     
     def _to_idx_logits(self, attn_weights, eps=1e-7):
         return torch.log(torch.clamp(attn_weights, eps, 1-eps))
@@ -368,8 +372,9 @@ class PointerStyleEvolver(Evolver):
         # pointer gets to use raw positional embeddings as keys?
         ## NOTE -- REVERT
         cheating_tgt = self.positional_embedding(torch.zeros_like(tgt, device=self.device), d=1)
-        idx_weights = self.pointer(cheating_tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
-        idx_logits = self._to_idx_logits(idx_weights)
+        idx_logits = self.idx_ffn(cheating_tgt)
+        # idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
+        # idx_logits = self._to_idx_logits(idx_weights)
         
         probs =  (
             F.log_softmax(op_logits, dim=-1),
@@ -673,7 +678,11 @@ def train(
     - run_eval(self, eval_loader, eval_steps)
     '''
     
-    for step, batch in tqdm(enumerate(train_loader, start=start_step), total=train_steps):
+    for step, batch in tqdm(
+        enumerate(train_loader, start=start_step),
+        total=train_steps,
+        disable=wandb.run is None
+    ):
         if step >= train_steps: break
         
         batch = model.prepare_batch(batch, step, pf_params)

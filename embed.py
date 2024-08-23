@@ -3,7 +3,12 @@ import math
 import torch
 import torch.nn as nn
 
-class SinusoidalEmbedding(nn.Module):
+class ReversibleEmbedding(nn.Module):
+    
+    def forward(self, x, d):
+        raise NotImplementedError()
+
+class SinusoidalEmbedding(ReversibleEmbedding):
     
     def __init__(self, d_model=512, max_len=10):
         super().__init__()
@@ -17,7 +22,19 @@ class SinusoidalEmbedding(nn.Module):
     def forward(self, x, d):
         return x + d * self.pe[:, :x.shape[-2], :]
     
-class LearnedEmbedding(nn.Module):
+class RotaryEmbedding(ReversibleEmbedding):
+    
+    def __init__(self):
+        pass
+    
+    def forward(self, x, d):
+        pass
+    
+class IdentityEmbedding(ReversibleEmbedding):
+    def __init__(self, **_): super().__init__()
+    def forward(self, x, **_): return x
+    
+class LearnedEmbedding(ReversibleEmbedding):
     
     def __init__(self, d_model=512, max_len=10):
         super().__init__()

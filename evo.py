@@ -24,7 +24,9 @@ from utils import parse_model_id, get_name
 from embed import (
     SinusoidalEmbedding,
     LearnedEmbedding,
-    DepthEmbedding
+    DepthEmbedding,
+    IdentityEmbedding,
+    RotaryEmbedding
 )
 from trans import (
     TransformerEncoderLayer,
@@ -121,8 +123,12 @@ class Evolver(nn.Module):
         self.static_embeddings = static_embeddings
         self.name = name
       
-        PositionalEmbedding = SinusoidalEmbedding if positional_embeddings == 'sinu' else LearnedEmbedding
-        self.positional_embedding = PositionalEmbedding(d_model=d_model, max_len=max_len)
+        self.positional_embedding = {
+            'sinu': SinusoidalEmbedding,
+            'learned': LearnedEmbedding,
+            'identity': IdentityEmbedding,
+            'rope': RotaryEmbedding
+        }[positional_embeddings](d_model=d_model, max_len=max_len)
         self.depth_embedding = DepthEmbedding(d_model=d_model) if depth_embeddings else None
         self.token_embedding = nn.Embedding(vocab_size, d_model)
 
@@ -492,7 +498,7 @@ class Transformer(nn.Module):
     
     def prepare_batch(self, batch, *_):
         input_ids, output_ids = batch
-        return input_ids.to(self.device), output_ids.to(self.device)
+        return input_ids.to(self.device), output_ids.to(device)
     
     def step(self, inputs, _):
         input_ids, output_ids = inputs

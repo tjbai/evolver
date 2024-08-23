@@ -1,4 +1,13 @@
-# new
+# new new
+
+[ ] evaluate (debug?) different ar-d training methods (ar-d vs. den)
+[ ] formalize integrating substitutions
+[ ] set up inference harness to consider other meta-objectives
+[ ] figure out how to do controllable generation/guidance?
+
+we don't have to beat on LL to do well!!!!
+
+# deprecated p2
 
 [ ] supervised training off the ground
 [ ] baseline AR off the ground

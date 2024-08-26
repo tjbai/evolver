@@ -29,8 +29,7 @@ def sample_trajectory(
     B, T, N = traj_input_ids.shape
     device = traj_input_ids.device
     
-    traj_src, traj_pad_mask = evolver.get_src(traj_input_ids)
-    src = traj_src[:, 0]
+    src, _ = evolver.get_src(traj_input_ids[:, 0])
     
     traj_log_prob = torch.zeros(B, device=device)
     traj_op_tgts = torch.zeros(B, T-1, N, 5, device=device)
@@ -40,8 +39,7 @@ def sample_trajectory(
     for t in range(T-1):
         edit_tgts, src, log_prob = particle_filter(
             evolver, traj_input_ids[:, t], traj_input_ids[:, t+1],
-            src, t, traj_pad_mask[:, t, :], traj_pad_mask[:, t+1, :],
-            num_particles, threshold, temperature, resample_at
+            src, t, num_particles, threshold, temperature, resample_at
         )
         
         traj_log_prob += log_prob
@@ -84,7 +82,7 @@ def maybe_resample(weights, threshold, M):
     samples = torch.where(resample_mask.unsqueeze(1), samples, indices)
     
     return samples, resample_mask
-
+    
 @torch.no_grad()
 def particle_filter(
     evolver,
@@ -92,14 +90,16 @@ def particle_filter(
     output_ids,   # BxN
     src,          # BxNxD
     t,            # int ¯\_(ツ)_/¯
-    src_pad_mask, # BxN
-    tgt_pad_mask, # BxN
     M, threshold,
     temperature,
     resample_at
 ):
     B, N = input_ids.shape
     device = input_ids.device
+    
+    _src, src_pad_mask = evolver.get_src(input_ids)
+    _, tgt_pad_mask = evolver.get_src(output_ids)
+    src = src or _src
     
     batch_ids = input_ids.unsqueeze(1).repeat(1, M, 1)       # BxMxN
     src = src.unsqueeze(1).repeat(1, M, 1, 1)                # BxMxNxD
@@ -195,6 +195,13 @@ def particle_filter(
             ens_toks = ens_toks[torch.arange(B).unsqueeze(1), samples]
             ens_idxs = ens_idxs[torch.arange(B).unsqueeze(1), samples]
             weights[resample_mask] = 0
+          
+    # gross python scope stuff but it works 
+    while i < N: 
+        ens_ops[:, :, i, PAD_ID] = 1
+        ens_toks[pad, :, i, PAD_TOKEN_ID] = 1
+        ens_idxs[pad, :, i, 0] = 1
+        i += 1
   
     # sampled edit targets for each ensemble
     samples = torch.multinomial(torch.exp(weights), 1).squeeze() if M > 1 else torch.zeros(B, dtype=torch.long)
@@ -207,92 +214,87 @@ def particle_filter(
     return edit_tgts, src, weights[torch.arange(B, device=device), samples]
 
 @torch.no_grad()
-def fast_sample(
-    evolver,
-    input_ids,
-    src, src_pad_mask,
-    M, threshold,
-    resample_at
+def sample(
+    model,
+    input_ids, src,
+    M, threshold, resample_at
 ):
     B, N = input_ids.shape
     device = input_ids.device
+    
+    _src, src_pad_mask = model.get_src(input_ids)
+    src = src or _src
     
     batch_ids = input_ids.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     src = src.unsqueeze(1).expand(-1, M, -1, -1).reshape(B*M, N, -1)
     src_pad_mask = src_pad_mask.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     
-    log_probs = torch.zeros(B*M, device=device)
+    weights = torch.zeros(B*M, device=device)
     alive = torch.ones(B*M, dtype=torch.bool)
     
     ens_ops = torch.zeros(B*M, N, 5, dtype=torch.long, device=device)
     ens_toks = torch.zeros(B*M, N, VOCAB_SIZE, dtype=torch.long, device=device)
     ens_idxs = torch.zeros(B*M, N, N, dtype=torch.long, device=device)
     
-    # initialize BOS
     ens_ops[:, 0, INS_ID] = 1
     ens_toks[:, 0, BOS_TOKEN_ID] = 1
     ens_idxs[:, 0, 0] = 1
     
-    # initialize PAD everywhere else 
-    ens_ops[:, 1:, PAD_ID] = 1
-   
-    memory = cache = None
+    mem = None
+    cache = None
+    
     for t in range(1, N):
-        
-        # handle pad
         ens_ops[~alive, t, PAD_ID] = 1
         ens_toks[~alive, t, PAD_TOKEN_ID] = 1
         ens_idxs[~alive, t, 0] = 1
+        if not torch.any(alive): continue
         
-        if not torch.any(alive): break
-        
-        edit_probs, _, memory, cache = evolver.forward(
-            batch_ids, (ens_ops[:, :t], ens_toks[:, :t], ens_idxs[:, :t]),
-            src, t, memory, cache
-        )
-    
-        op_probs, tok_probs, idx_probs = tuple(map(
-            lambda x: x[:, -1],
-            edit_probs
-        ))
-        
+        ens = tuple(map(lambda x: x[:, :t], (ens_ops, ens_toks, ens_idxs)))
+        edit_probs, _, mem, cache = model.forward(batch_ids, ens, src, t, mem, cache)
+
+        op_probs, tok_probs, idx_probs = tuple(map(lambda x: x[:, -1], edit_probs))
         ops = torch.multinomial(torch.exp(op_probs), num_samples=1).squeeze()
         toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
-    
-        # handle eos 
+        
         ens_ops[alive & ops.eq(EOS_ID), t, EOS_ID] = 1
         ens_toks[alive & ops.eq(EOS_ID), t, PAD_TOKEN_ID] = 1
         ens_idxs[alive & ops.eq(EOS_ID), t, 0] = 1
-        
-        # update the living
+       
         alive &= ~ops.eq(EOS_ID)
         ens_ops[torch.arange(B*M, device=device)[alive], t, ops[alive]] = 1
         ens_toks[torch.arange(B*M, device=device)[alive], t, toks[alive]] = 1
         ens_idxs[torch.arange(B*M, device=device)[alive], t, idxs[alive]] = 1
-    
-        # update log probs 
-        log_probs += op_probs[torch.arange(B*M), ops]
-        log_probs[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
-        log_probs[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
         
+        weights += op_probs[torch.arange(B*M), ops]
+        weights[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
+        weights[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += idx_probs[torch.arange(B*M), idxs][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
+        
+        if M > 1:
+            weights = (weights.view(B, M) - torch.logsumexp(weights.view(B, M), dim=-1, keepdim=True)).view(B*M)
+            
         if t % resample_at == 0:
-            weights = log_probs.view(B, M) - torch.logsumexp(log_probs.view(B, M), dim=-1, keepdim=True)
-            samples, _ = maybe_resample(weights, threshold, M)
+            samples, resample_mask= maybe_resample(weights.view(B, M), threshold, M)
+            ens_ops = ens_ops[torch.arange(B).unsqueeze(1), samples]
+            ens_toks = ens_toks[torch.arange(B).unsqueeze(1), samples]
+            ens_idxs = ens_idxs[torch.arange(B).unsqueeze(1), samples]
+            weights[resample_mask] = 0
             
-            ens_ops, ens_toks, ens_idxs = tuple(map(
-                lambda x: x.view(B, M, N, -1)[torch.arange(B, device=device).unsqueeze(1), samples].view(B*M, N, -1),
-                (ens_ops, ens_toks, ens_idxs)
-            ))
-            
-            log_probs = log_probs.view(B, M)[torch.arange(B, device=device).unsqueeze(1), samples].view(B*M)
+    # while t < N:
+    #     ens_ops[:, t, PAD_ID] = 1
+    #     ens_toks[:, t, PAD_TOKEN_ID] = 1
+    #     ens_idxs[:, t, 0] = 1
         
-    return (
-       (ens_ops.view(B, M, N, -1),
-        ens_toks.view(B, M, N, -1),
-        ens_idxs.view(B, M, N, -1)),
-        log_probs.view(B, M)
-    )
+    weights = weights.view(B, M) 
+    ens = tuple(map(lambda x: x.view(B, M, N, -1), (ens_ops, ens_toks, ens_idxs)))
+    
+    samples = torch.multinomial(torch.exp(weights), 1).squeeze() if M > 1 else torch.zeros(B, dtype=torch.long)
+    edit_tgts = tuple(map(lambda x: x[torch.arange(B, device=device), samples], ens))
+    
+    mem = mem.view(B, M, N, -1)[:, 0]
+    tgt = model.compute_tgt(input_ids, edit_tgts, mem)
+    
+    return edit_tgts, tgt #, weights[torch.arange(B, device=device), samples]
 
 def apply_edits(input_ids, edits):
     edits = tuple(map(lambda x: torch.argmax(x, dim=-1), edits)) 

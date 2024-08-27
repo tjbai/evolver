@@ -480,23 +480,29 @@ class Transformer(nn.Module):
         return x, pad_mask
     
     def forward(self, input_ids, output_ids):
-        src, src_pad_mask = self.embed(input_ids)
-        tgt, tgt_pad_mask = self.embed(output_ids)
         causal_mask = T.generate_square_subsequent_mask(self.max_len, self.device, dtype=torch.bool)
-       
-        h = self.encoder(
-            src,
-            is_causal=self.decoder_layers == 0,
-            mask=None if self.decoder_layers else causal_mask,
-            src_key_padding_mask=src_pad_mask
-        )
         
         if self.decoder_layers > 0:
+            src, src_pad_mask = self.embed(input_ids)
+            tgt, tgt_pad_mask = self.embed(output_ids)
+            
+            h = self.encoder(src, src_key_padding_mask=src_pad_mask)
+        
             h = self.decoder(
                 tgt, h,
                 tgt_mask=causal_mask,
                 tgt_key_padding_mask=tgt_pad_mask,
                 memory_key_padding_mask=src_pad_mask
+            )
+            
+        else:
+            src, src_pad_mask = self.embed(output_ids)
+            
+            h = self.encoder(
+                src,
+                is_causal=True,
+                mask=causal_mask,
+                src_key_padding_mask=src_pad_mask
             )
         
         tok_logits = self.tok_head(h)
@@ -506,7 +512,7 @@ class Transformer(nn.Module):
     
     def prepare_batch(self, batch, *_):
         input_ids, output_ids = batch
-        return input_ids.to(self.device), output_ids.to(device)
+        return input_ids.to(self.device), output_ids.to(self.device)
     
     def step(self, inputs, _):
         input_ids, output_ids = inputs
@@ -533,7 +539,22 @@ class Transformer(nn.Module):
         return tl
     
     def run_eval(self, eval_loader, eval_steps):
-        return elbo(self, eval_loader, eval_steps)
+        if self.decoder_layers > 0: return elbo(self, eval_loader, eval_steps)
+        
+        tot_loss = 0
+        tot_n = 0
+        for step, batch in enumerate(eval_loader):
+            if step >= eval_steps: break
+            input_ids, output_ids = self.prepare_batch(batch)
+            tok_probs = self.forward(input_ids, output_ids)
+            loss, n = xent(
+                tok_probs[:, :-1],
+                F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
+                ignore=self.pad_token_id
+            )
+            tot_loss += loss
+            tot_n += n
+        return tot_loss / tot_n
     
 class DenoisingTransformer(Transformer):
     '''
@@ -795,12 +816,12 @@ def init_loaders(name, config):
 
     if name.startswith('ar'):
         logger.info('using ar loaders')
-        train_dataset = SequenceDataset.from_trajectories(path=config['train'], denoising=True, **kwargs)
+        train_dataset = SequenceDataset.from_trajectories(path=config['train'], denoising=name.startswith('ar-d'), **kwargs)
         train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=sampler(train_dataset, config['batch_size']))
         eval_loader = (
             unsupervised_loader(path=config['eval'], **kwargs)
             if name.startswith('ar-d') else
-            DataLoader(SequenceDataset.from_trajectories(path=config['eval'], denoising=True, **kwargs), batch_size=config['batch_size'], shuffle=True)
+            DataLoader(SequenceDataset.from_trajectories(path=config['eval'], denoising=False, **kwargs), batch_size=config['batch_size'], shuffle=True)
         )
     elif 'unsup' in name or name.startswith('den'):
         logger.info('using unsupervised loaders')

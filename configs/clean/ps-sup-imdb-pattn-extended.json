@@ -1,7 +1,7 @@
 {
     "train": "data/imdb/imdb_train_4.jsonl",
     "eval": "data/imdb/imdb_dev_4.jsonl",
-    "notes": "baseline pointer style with longer trajectories",
+    "notes": "baseline pointer style with longer trajectories, has cheating",
     "cache_prefix": "sup-imdb-4",
 
     "d_model": 512,

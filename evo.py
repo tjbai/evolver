@@ -556,7 +556,7 @@ class Transformer(nn.Module):
             )
             tot_loss += loss
             tot_n += n
-        return tot_loss / tot_n
+        return -tot_loss / tot_n
     
 class DenoisingTransformer(Transformer):
     '''

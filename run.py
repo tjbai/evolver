@@ -7,9 +7,9 @@ import torch.nn.functional as F
 
 from data import (
     get_edit_tgts,
-    get_input_ids,
     pad_traj_input_ids,
-    pad_traj_edit_tgts
+    pad_traj_edit_tgts,
+    elaborate
 )
 
 from const import (
@@ -22,7 +22,7 @@ logging.basicConfig()
 logger = logging.getLogger('train')
 logger.setLevel(logging.DEBUG if ('DEBUG' in os.environ) else logging.INFO)
 
-def sample_trajectory(
+def pf_trajectory(
     evolver, traj_input_ids,
     num_particles, threshold=0, temperature=1, resample_at=1
 ):
@@ -213,17 +213,36 @@ def particle_filter(
     
     return edit_tgts, src, weights[torch.arange(B, device=device), samples]
 
+def sample_trajectory(model, input_ids, T, pf_params, verbose=False):
+    if 'num_particles' in pf_params:
+        pf_params['M'] = pf_params['num_particles']
+        del pf_params['num_particles']
+    
+    traj_edits = ([], [], [])
+    traj_ids = []
+    src = None
+    
+    for t in range(T):
+        if verbose: logger.info(f'starting iter {t}')
+        edits, src = sample(model, input_ids, src, verbose=verbose, **pf_params)
+        input_ids = apply_edits(input_ids, edits)
+        traj_ids.append(input_ids)
+        for i in range(3): traj_edits[i].append(edits[i])
+        if verbose: logger.info(f'cur edits\n{elaborate(edits)}')
+        
+    return torch.stack(traj_ids), tuple(map(lambda x: torch.stack(x), traj_edits))
+
 @torch.no_grad()
 def sample(
-    model,
-    input_ids, src,
-    M, threshold, resample_at
+    model, input_ids, src,
+    M, threshold, resample_at,
+    verbose=False
 ):
     B, N = input_ids.shape
     device = input_ids.device
     
     _src, src_pad_mask = model.get_src(input_ids)
-    src = src or _src
+    if src is None: src = _src
     
     batch_ids = input_ids.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     src = src.unsqueeze(1).expand(-1, M, -1, -1).reshape(B*M, N, -1)
@@ -243,7 +262,7 @@ def sample(
     mem = None
     cache = None
     
-    for t in range(1, N):
+    for t in tqdm(range(1, N), disable=not verbose):
         ens_ops[~alive, t, PAD_ID] = 1
         ens_toks[~alive, t, PAD_TOKEN_ID] = 1
         ens_idxs[~alive, t, 0] = 1
@@ -470,7 +489,7 @@ def _sample_batch(
     for input_ids in tqdm(batch_ids):
         input_ids = input_ids.to(device)
        
-        cur_tgts, _ = sample_trajectory(
+        cur_tgts, _ = _sample_trajectory(
             evolver, input_ids,
             num_particles, threshold, temperature,
             device

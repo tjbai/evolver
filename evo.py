@@ -19,7 +19,7 @@ from transformers import BertTokenizer
 from tqdm import tqdm
 
 from const import *
-from run import sample_trajectory, apply_edits
+from run import pf_trajectory, apply_edits
 from utils import parse_model_id, get_name
 from embed import (
     SinusoidalEmbedding,
@@ -297,13 +297,13 @@ class Evolver(nn.Module):
         else:
             s = time.time()
             self.eval()
-            traj_edit_tgts, _ = sample_trajectory(self, traj_input_ids, **pf_params)
+            traj_edit_tgts, _ = pf_trajectory(self, traj_input_ids, **pf_params)
             log({'train/e_time': time.time()-s}, step=step)
             
         return traj_input_ids, traj_edit_tgts
     
     def _ll(self, traj_input_ids):
-        return sample_trajectory(self, traj_input_ids, num_particles=1, temperature=0.5)[1]
+        return pf_trajectory(self, traj_input_ids, num_particles=1, temperature=0.5)[1]
     
     def run_eval(self, eval_loader, eval_steps):
         return elbo(self, eval_loader, eval_steps) 
@@ -370,9 +370,10 @@ class PointerStyleEvolver(Evolver):
         
         # what if we just cheated?
         # idea: should just be able to look at the positional embedding subspace
-        idx_logits = self.idx_ffn(tgt)
-        # idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
-        # idx_logits = self._to_idx_logits(idx_weights)
+        # cheating_tgt = self.positional_embedding(torch.zeros_like(tgt, device=self.device), d=1)
+        # idx_logits = self.idx_ffn(cheating_tgt)
+        idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights
+        idx_logits = self._to_idx_logits(idx_weights)
         
         probs =  (
             F.log_softmax(op_logits, dim=-1),

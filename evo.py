@@ -512,7 +512,9 @@ class Transformer(nn.Module):
     
     def prepare_batch(self, batch, *_):
         input_ids, output_ids = batch
-        return input_ids.to(self.device), output_ids.to(self.device)
+        if self.decoder_layers > 0:
+            return input_ids.to(self.device), output_ids.to(self.device)
+        return None, output_ids.to(self.device)
     
     def step(self, inputs, _):
         input_ids, output_ids = inputs

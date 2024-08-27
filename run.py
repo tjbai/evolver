@@ -1,9 +1,11 @@
 import os
 import logging
+import argparse
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 from data import (
     get_edit_tgts,
@@ -333,7 +335,43 @@ def apply_edits(input_ids, edits):
     res[eos_mask] = EOS_TOKEN_ID
     
     return res
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('input_file')
+    parser.add_argument('--model', default='gpt2')
+    return parser.parse_args()
+
+@torch.no_grad()
+def compute_ppl(model, tokenizer, text, device):
+    encodings = tokenizer(text, return_tensors='pt')
+    input_ids = encodings.input_ids.to(device)
+    outputs = model(input_ids, labels=input_ids.clone())
+    loss = outputs.loss
+    return torch.exp(loss).item(), input_ids.numel()
+
+def main():
+    args = parse_args()
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    model = GPT2LMHeadModel.from_pretrained(args.model).to(device)
+    tokenizer = GPT2Tokenizer.from_pretrained(args.model)
    
+    tot_ppl = 0
+    tot_n = 0 
+    with open(args.input_file, 'r') as f:
+        for line in tqdm(f):
+            line = line.strip()
+            if not line: continue
+            ppl_pt, n = compute_ppl(model, tokenizer, line, device)
+            tot_ppl += ppl_pt * n
+            tot_n += n
+            
+    logger.info(f'avg ppl: {tot_ppl / tot_n}')
+
+if __name__ == '__main__':
+    main()
+
 ### to deprecate
 
 def _decode_stochastic(edit_probs):

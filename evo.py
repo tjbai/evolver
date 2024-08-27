@@ -725,7 +725,7 @@ def train(
         if (step + 1) % eval_at == 0:
             s = time.time()
             model.eval()
-            eval_loss = model.run_eval(eval_loader, eval_steps)
+            with torch.no_grad(): eval_loss = model.run_eval(eval_loader, eval_steps)
             log({'eval/loss': eval_loss, 'eval/time': time.time() - s}, step=step)
             
 def parse_args():

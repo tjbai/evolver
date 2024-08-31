@@ -350,9 +350,7 @@ class PointerStyleEvolver(Evolver):
         return self.op_head(torch.cat([c, tgt, h], dim=-1))
         
     def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
-        '''
-        in a sense this implements the evolver interface by returning a distribution over op/tok/idx
-        ''' 
+        # this implements the evolver interface by returning a distribution over op/tok/idx
         
         if self.training and mem is not None: raise Exception() 
         if self.training and cache is not None: raise Exception()

@@ -382,16 +382,7 @@ class PointerStyleEvolver(Evolver):
         return probs, tgt, mem, cache
     
 class PGNStyleEvolver(PointerStyleEvolver):
-    '''
-    changes:
-    - inherits changes from PointerStyleEvolver relative to baseline
-    - trained as a mixture distribution between vocab and previous seq tokens, i.e. p * ins + (1-p) * cpy
-    - can only be supervised with INS/CPY ops and treats EOS as INS(eos) or CPY(n)
-    - in the static embedding case, this is equivalent to an iterated PGN. otherwise, we use a pooling op over prev. occurrences
-    
-    problem:
-    - pooling should probably be weighted over the xattn weights
-    '''
+    # an artifact with weighted pooling over CPY parents, allowing for interpolated training
     
     def compute_tgt(self, input_ids, edit_tgts, mem):
         # we only use edit_tgts here to reconstruct output_ids
@@ -414,15 +405,7 @@ class PGNStyleEvolver(PointerStyleEvolver):
         tgt = self.positional_embedding(tgt, d=1)
         return tgt
     
-    def forward(self, input_ids, edit_tgts, src=None, t=None, mem=None, cache=None):
-        pass
-    
 class Transformer(nn.Module):
-    '''
-    standard transformer used either as:
-    - a decoder-only autoregressive model for one-step generation
-    - an encoder-decoder seq2seq model trained on denoising pairs (x_t, x_{t+1})
-    '''
     
     def __init__(
         self,
@@ -510,9 +493,7 @@ class Transformer(nn.Module):
     
     def prepare_batch(self, batch, *_):
         input_ids, output_ids = batch
-        if self.decoder_layers > 0:
-            return input_ids.to(self.device), output_ids.to(self.device)
-        return None, output_ids.to(self.device)
+        return input_ids.to(self.device), output_ids.to(self.device)
     
     def step(self, inputs, _):
         input_ids, output_ids = inputs
@@ -522,6 +503,11 @@ class Transformer(nn.Module):
             F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
             ignore=self.pad_token_id
         )
+        
+        # conditional case
+        if self.decoder_layers == 0:
+            loss[(input_ids[:, 1:] != self.pad_token_id) & (input_ids[:, 1:] != self.eos_token_id)] = 0
+        
         return loss / n
     
     def _ll(self, traj_input_ids):

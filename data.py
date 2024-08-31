@@ -186,7 +186,8 @@ class SequenceDataset(Dataset):
                         outputs.append(traj[i+1])
                         
                 else:
-                    inputs.append('')
+                    # should be '' in unconditional generation, otherwise the "prompt"
+                    inputs.append(traj[0]) 
                     outputs.append(traj[-1])
                     
         return cls(inputs, outputs, **kwargs)
@@ -199,7 +200,6 @@ class SequenceDataset(Dataset):
         self.input_ids = get_input_ids(inputs, max_len, tokenizer)
         self.output_ids = get_input_ids(outputs, max_len, tokenizer)
         logger.info(f'done in {time.time() - s:.2f} seconds!')
-    
         self.limit = len(self.input_ids) if limit is None else limit
         
     def __len__(self):

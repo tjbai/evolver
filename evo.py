@@ -67,9 +67,10 @@ def timing(f):
         return result
     return wrap
 
-def xent(logprobs, tgts, ignore=-1):
+def xent(logprobs, tgts, ignore=-1, ignore_mask=None):
     loss = torch.sum(logprobs * tgts, dim=-1)
     keep_mask = torch.argmax(tgts, dim=-1) != ignore
+    if ignore_mask is not None: keep_mask &= ~ignore_mask
     loss = loss * keep_mask
     tot = torch.sum(loss)
     n = torch.sum(keep_mask)
@@ -252,9 +253,10 @@ class Evolver(nn.Module):
         probs = self._get_probs((op_logits, tok_logits, idx_logits), pad_mask)
         return probs, tgt, memory, cache
    
-    def loss(self, edit_probs, edit_tgts):
+    def loss(self, edit_probs, edit_tgts, ignore_mask=None):
+        logger.info(f'using ignore mask:\n{ignore_mask}')
         return sum((
-            xent(p[:, :-1], t[:, 1:], ignore=i)
+            xent(p[:, :-1], t[:, 1:], ignore=i, ignore_mask=ignore_mask)
             for p, t, i in zip(edit_probs, edit_tgts, [PAD_ID, PAD_TOKEN_ID, 0]
         )), ())
 
@@ -269,7 +271,11 @@ class Evolver(nn.Module):
             edit_tgts = tuple(map(lambda x: x[:, t], traj_edit_tgts))
             edit_probs, src, *_ = self.forward(input_ids, edit_tgts, src, t)
           
-            loss = self.loss(edit_probs, edit_tgts)
+            loss = self.loss(
+                edit_probs, edit_tgts,
+                ignore_mask=(traj_input_ids[:, 0, 1:] != self.pad_token_id) & (traj_input_ids[:, 0, 1:] != self.eos_token_id)
+            )
+            
             for i in range(3):
                 tot[i] += loss[2*i]
                 n[i] += loss[2*i+1]
@@ -501,12 +507,9 @@ class Transformer(nn.Module):
         loss, n = xent(
             tok_probs[:, :-1],
             F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
-            ignore=self.pad_token_id
+            ignore=self.pad_token_id,
+            ignore_mask=(input_ids[:, 1:] != self.pad_token_id) & (input_ids[:, 1:] != self.eos_token_id)
         )
-        
-        # conditional case
-        if self.decoder_layers == 0:
-            loss[(input_ids[:, 1:] != self.pad_token_id) & (input_ids[:, 1:] != self.eos_token_id)] = 0
         
         return loss / n
     
@@ -683,6 +686,10 @@ def train(
     - step(self, inputs, step)
     - run_eval(self, eval_loader, eval_steps)
     '''
+    
+    logger.info('eval pass sanity check...')
+    model.eval()
+    model.run_eval(eval_loader, 5)
     
     for step, batch in tqdm(
         enumerate(train_loader, start=start_step),

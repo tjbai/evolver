@@ -423,6 +423,7 @@ class Transformer(nn.Module):
         max_len=512,
         vocab_size=VOCAB_SIZE,
         pad_token_id=PAD_TOKEN_ID,
+        eos_token_id=EOS_TOKEN_ID,
         device='cpu',
         name=None,
         **_
@@ -437,6 +438,7 @@ class Transformer(nn.Module):
         self.decoder_layers = decoder_layers
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
         self.device = device
         self.name = name
       
@@ -521,7 +523,7 @@ class Transformer(nn.Module):
             ll = xent(
                 tok_probs[:, :-1],
                 F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
-                ignore=self.pad_token_id
+                ignore=self.pad_token_id,
             )[0]
             tl -= ll
         return tl
@@ -538,7 +540,8 @@ class Transformer(nn.Module):
             loss, n = xent(
                 tok_probs[:, :-1],
                 F.one_hot(output_ids[:, 1:], num_classes=self.vocab_size),
-                ignore=self.pad_token_id
+                ignore=self.pad_token_id,
+                ignore_mask=(input_ids[:, 1:] != self.pad_token_id) & (input_ids[:, 1:] != self.eos_token_id)
             )
             tot_loss += loss
             tot_n += n

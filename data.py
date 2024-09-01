@@ -123,6 +123,7 @@ class SupervisedTrajectoryDataset(TrajectoryDataset):
         ):
             path = f'{self.cache_path}/{self.cache_prefix}_{i}.zst'
             if os.path.exists(path): continue
+            logger.info(f'cache miss for {path}')
             
             data = get_traj_edit_tgts(traj, max_len, tokenizer, aligner)
             with open(path, 'wb') as f: pickle.dump(data, f)

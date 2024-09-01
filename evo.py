@@ -238,7 +238,7 @@ class Evolver(nn.Module):
         if self.training and cache is not None: raise Exception()
         
         _src, pad_mask = self.get_src(input_ids)
-        src = src or _src
+        src = src if src is not None else _src
         
         encoder, decoder = self._get_codec(t)
         depth_embed = self.depth_embedding(torch.full((B,), t, device=self.device)) if self.depth_embedding else None
@@ -254,7 +254,6 @@ class Evolver(nn.Module):
         return probs, tgt, memory, cache
    
     def loss(self, edit_probs, edit_tgts, ignore_mask=None):
-        logger.info(f'using ignore mask:\n{ignore_mask}')
         return sum((
             xent(p[:, :-1], t[:, 1:], ignore=i, ignore_mask=ignore_mask)
             for p, t, i in zip(edit_probs, edit_tgts, [PAD_ID, PAD_TOKEN_ID, 0]

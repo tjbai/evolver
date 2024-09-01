@@ -101,7 +101,7 @@ def particle_filter(
     
     _src, src_pad_mask = evolver.get_src(input_ids)
     _, tgt_pad_mask = evolver.get_src(output_ids)
-    src = src or _src
+    src = src if src is not None else _src
     
     batch_ids = input_ids.unsqueeze(1).repeat(1, M, 1)       # BxMxN
     src = src.unsqueeze(1).repeat(1, M, 1, 1)                # BxMxNxD

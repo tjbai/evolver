@@ -1,6 +1,8 @@
 {
     "train": "data/toy/prefix-toy.jsonl",
     "eval": "data/toy/prefix-toy.jsonl",
+    "cache_prefix": "ps-sup-toy",
+    "from_checkpoint": "checkpoints/ps-sup-toy_20240902_152003-0.pt",
 
     "d_model": 64,
     "nhead": 8,

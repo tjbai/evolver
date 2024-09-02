@@ -32,6 +32,7 @@ def pf_trajectory(
     device = traj_input_ids.device
     
     src, _ = evolver.get_src(traj_input_ids[:, 0])
+    prefix_mask = ~(traj_input_ids[:, 0].eq(PAD_TOKEN_ID) | traj_input_ids[:, 0].eq(EOS_TOKEN_ID))
     
     traj_log_prob = torch.zeros(B, device=device)
     traj_op_tgts = torch.zeros(B, T-1, N, 5, device=device)
@@ -40,8 +41,16 @@ def pf_trajectory(
 
     for t in range(T-1):
         edit_tgts, src, log_prob = particle_filter(
-            evolver, traj_input_ids[:, t], traj_input_ids[:, t+1],
-            src, t, num_particles, threshold, temperature, resample_at
+            evolver=evolver,
+            input_ids=traj_input_ids[:, t],
+            output_ids=traj_input_ids[:, t+1],
+            src=src,
+            prefix_mask=prefix_mask,
+            t=t,
+            M=num_particles,
+            threshold=threshold,
+            temperature=temperature,
+            resample_at=resample_at
         )
         
         traj_log_prob += log_prob
@@ -88,13 +97,15 @@ def maybe_resample(weights, threshold, M):
 @torch.no_grad()
 def particle_filter(
     evolver,
-    input_ids,    # BxN
-    output_ids,   # BxN
-    src,          # BxNxD
-    t,            # int ¯\_(ツ)_/¯
-    M, threshold,
-    temperature,
-    resample_at
+    input_ids,        # BxN
+    output_ids,       # BxN
+    src,              # BxNxD
+    prefix_mask=None, # BxN
+    t=None,
+    M=1,
+    threshold=0,
+    temperature=1.0,
+    resample_at=1,
 ):
     B, N = input_ids.shape
     device = input_ids.device
@@ -123,6 +134,7 @@ def particle_filter(
     memory = cache = None 
     for i in range(1, N): 
         forced = output_ids[:, i]
+        is_prefix = prefix_mask[:, i] if prefix_mask is not None else torch.ones(B, device=device, dtype=torch.bool)
        
         # update pad first so we can early exit 
         pad = forced.eq(PAD_TOKEN_ID)
@@ -171,13 +183,20 @@ def particle_filter(
         
         # C[i, j] = one_hot(B[i, A[i, j]]])
         fn = lambda A, B, D: F.one_hot(B[torch.arange(A.size(0), device=device).unsqueeze(1).expand_as(A), A], num_classes=D)
-       
-        update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID))
+      
+        # (slow) update the sampled edits
+        update = ~(forced.eq(PAD_TOKEN_ID) | forced.eq(EOS_TOKEN_ID) | is_prefix)
         ens_ops[update, :, i, :] = fn(samples, op_ids[:, i, :], 5)[update]
         ens_toks[update, :, i, :] = fn(samples, tok_ids[:, i, :], VOCAB_SIZE)[update]
         ens_idxs[update, :, i, :] = fn(samples, idx_ids[:, i, :], N)[update]
         weights[update] += sample_weight[update]
-       
+
+        # force decode the prefix
+        ens_ops[is_prefix, :, i, CPY_ID] = 1
+        ens_toks[is_prefix, :, i, PAD_TOKEN_ID] = 1
+        ens_idxs[is_prefix, :, i, i] = 1
+        
+        # handle EOS 
         eos = forced.eq(EOS_TOKEN_ID)
         ens_ops[eos, :, i, EOS_ID] = 1
         ens_toks[eos, :, i, PAD_TOKEN_ID] = 1

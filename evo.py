@@ -264,7 +264,7 @@ class Evolver(nn.Module):
         _, T, _ = traj_input_ids.shape
         tot, n = [0, 0, 0], [0, 0, 0]
        
-        src = None 
+        src = None
         for t in range(T-1):
             input_ids = traj_input_ids[:, t]
             edit_tgts = tuple(map(lambda x: x[:, t], traj_edit_tgts))
@@ -371,8 +371,7 @@ class PointerStyleEvolver(Evolver):
         op_logits = self._to_op_logits(attn_weights, mem, tgt, h)
         tok_logits = self.tok_head(h)
         
-        # what if we just cheated?
-        # idea: should just be able to look at the positional embedding subspace
+        # NOTE: what if we just cheated?
         cheating_tgt = self.positional_embedding(torch.zeros_like(tgt, device=self.device), d=1)
         idx_logits = self.idx_ffn(cheating_tgt)
         # idx_weights = self.pointer(tgt, mem, key_padding_mask=src_pad_mask) if self.pointer_attn else attn_weights

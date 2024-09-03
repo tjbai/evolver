@@ -38,7 +38,6 @@ class TransformerEncoderLayer(nn.Module):
         self.activation = F.relu
        
     def forward(self, x, src_mask=None, src_key_padding_mask=None, is_causal=False):
-        # TODO -- flash attention?
         x = x + self._sa_block(x, src_mask, src_key_padding_mask, is_causal=is_causal)
         x = self.ln_2(x + self._ff_block(x))
         return x
@@ -177,7 +176,6 @@ class CausalTransformerDecoderLayer(TransformerDecoderLayer):
             
         x = tgt[:, -1:, :]
       
-        # TODO -- none mask here? 
         res = self._causal_sa_block(x, tgt, None, tgt_key_padding_mask)
         x = self.ln_1(x + res)
         

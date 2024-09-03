@@ -19,8 +19,8 @@ from transformers import BertTokenizer
 from tqdm import tqdm
 
 from const import *
-from run import pf_trajectory, apply_edits
 from utils import parse_model_id, get_name
+
 from embed import (
     SinusoidalEmbedding,
     LearnedEmbedding,
@@ -46,6 +46,12 @@ from data import (
     unsupervised_loader,
     supervised_loader,
     elaborate
+)
+from run import (
+    pf_trajectory,
+    apply_edits,
+    get_one_hot_align_ids,
+    sample
 )
 
 logging.basicConfig()
@@ -262,19 +268,16 @@ class Evolver(nn.Module):
     def step(self, batch, step=None):
         traj_input_ids, traj_edit_tgts = batch
         _, T, _ = traj_input_ids.shape
+        
+        prefix_mask = ~(traj_input_ids[:, 0].eq(self.pad_token_id) | traj_input_ids[:, 0].eq(self.eos_token_id))
         tot, n = [0, 0, 0], [0, 0, 0]
-       
         src = None
+
         for t in range(T-1):
             input_ids = traj_input_ids[:, t]
             edit_tgts = tuple(map(lambda x: x[:, t], traj_edit_tgts))
             edit_probs, src, *_ = self.forward(input_ids, edit_tgts, src, t)
-          
-            loss = self.loss(
-                edit_probs, edit_tgts,
-                ignore_mask=(traj_input_ids[:, 0, 1:] != self.pad_token_id) & (traj_input_ids[:, 0, 1:] != self.eos_token_id)
-            )
-            
+            loss = self.loss(edit_probs, edit_tgts, ignore_mask=prefix_mask[:, 1:])
             for i in range(3):
                 tot[i] += loss[2*i]
                 n[i] += loss[2*i+1]
@@ -558,7 +561,6 @@ class DenoisingTransformer(Transformer):
         if self.encoder_layers == 0:
             raise Exception('denoising transformer requires > 0 encoder layers')
         
-        # note the name mismatch here
         encoder_layer = TransformerDecoderLayer(**self.codec_params)
         self.encoder = TransformerDecoder(encoder_layer, num_layers=self.encoder_layers)
         
@@ -605,8 +607,7 @@ class DenoisingTransformer(Transformer):
             
             tok_probs, prev_mem, prev_mask = self.forward(
                 input_ids, output_ids,
-                # prev_mem, prev_mask
-                # NOTE -- experiment
+                prev_mem, prev_mask,
                 None, None
             )
             
@@ -726,43 +727,60 @@ def train_dagger(
     pf_params, max_iters,
     start_step=0
 ):
-    '''
-    we need to consider...
-    - stopping conditions (fixed number of iterations? until we reach the target?)
-    - oracle callable fn input_ids output_ids -> edit_tgts
-    - sampling contract (get_one_hot_align_ids) for now
-    - apply edits
-    
-    model needs to implement:
-    - prepare_batch(batch)
-    - sample_edits(inputs, prefix_mask)
-    - query_oracle(inputs, outputs)
-    ''' 
-    
     for step, batch in tqdm(
         enumerate(train_loader, start_step=start_step),
         total=train_steps,
         disable=wandb.run is None
     ):
         if step >= train_steps: break
-
-        input_ids, output_ids = model.prepare_dagger_batch(batch, step, pf_params)
+        
+        traj_input_ids, *_ = batch
+        input_ids = traj_input_ids[:, 0].to(model.device)
+        output_ids = traj_input_ids[:, -1].to(model.device)
+        
         prefix_mask = ~(input_ids.eq(PAD_TOKEN_ID) | input_ids.eq(EOS_TOKEN_ID))
-        
+        tot, n = [0, 0, 0], [0, 0, 0]
         src = None
-        for _ in range(max_iters):
+        
+        times = []
+        for t in range(max_iters):
             if torch.all(input_ids == output_ids): break
-            edit_tgts = model.sample_edits(input_ids, prefix_mask)
+            
+            # sample edits from q
+            s = time.time()
+            sampled_edits, _src = sample(model, input_ids, src, prefix_mask=prefix_mask, **pf_params)
+            times.append(time.time() - s)
+           
+            # get gold edits and compute loss
+            edit_tgts = get_one_hot_align_ids(input_ids, output_ids, vocab_size=model.vocab_size, max_len=model.max_len)
+            edit_probs, _, *_ = model.forward(input_ids, edit_tgts, src, t)
+            loss = model.loss(edit_probs, edit_tgts, ignore_mask=prefix_mask[:, 1:])
+            
+            # apply q edits and update embeddings
+            input_ids = apply_edits(input_ids, sampled_edits)
+            src = _src
+           
+            # accumulate loss 
+            for i in range(3):
+                tot[i] += loss[2*i]
+                n[i] += loss[2*i+1]
+       
+        log({
+            'train/per_occ_op_loss': tot[0] / n[0],
+            'train/per_occ_tok_loss': tot[1] / n[1],
+            'train/per_occ_idx_loss': tot[2] / n[2],
+            'train/avg_sample_time': sum(times) / len(times)
+        }, step=step)
         
-        # while iters < max_iters and cur != target
+        model.train()
+        traj_loss = tot[0]/n[0] + tot[1]/n[1] + tot[2]/n[2]
+        traj_loss.backward()
         
-            # cur' = q(cur)
-            
-            # edit_tgts = get_one_hot_align_ids(cur, output_ids)
-            
-            # compute sim scores??? (can we do this at the sequence level????)
-            
-            # cur = cur', increment iters
+        if (step + 1) % checkpoint_at:
+            checkpoint_model(model, optim, None, step)
+        
+        if (step + 1) % eval_at:
+            logger.info('eval...')
             
 def parse_args():
     parser = argparse.ArgumentParser()

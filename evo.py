@@ -720,6 +720,50 @@ def train(
             with torch.no_grad(): eval_loss = model.run_eval(eval_loader, eval_steps)
             log({'eval/loss': eval_loss, 'eval/time': time.time() - s}, step=step)
             
+def train_dagger(
+    model, optim, train_loader, train_steps,
+    checkpoint_at, eval_at,
+    pf_params, max_iters,
+    start_step=0
+):
+    '''
+    we need to consider...
+    - stopping conditions (fixed number of iterations? until we reach the target?)
+    - oracle callable fn input_ids output_ids -> edit_tgts
+    - sampling contract (get_one_hot_align_ids) for now
+    - apply edits
+    
+    model needs to implement:
+    - prepare_batch(batch)
+    - sample_edits(inputs, prefix_mask)
+    - query_oracle(inputs, outputs)
+    ''' 
+    
+    for step, batch in tqdm(
+        enumerate(train_loader, start_step=start_step),
+        total=train_steps,
+        disable=wandb.run is None
+    ):
+        if step >= train_steps: break
+
+        input_ids, output_ids = model.prepare_dagger_batch(batch, step, pf_params)
+        prefix_mask = ~(input_ids.eq(PAD_TOKEN_ID) | input_ids.eq(EOS_TOKEN_ID))
+        
+        src = None
+        for _ in range(max_iters):
+            if torch.all(input_ids == output_ids): break
+            edit_tgts = model.sample_edits(input_ids, prefix_mask)
+        
+        # while iters < max_iters and cur != target
+        
+            # cur' = q(cur)
+            
+            # edit_tgts = get_one_hot_align_ids(cur, output_ids)
+            
+            # compute sim scores??? (can we do this at the sequence level????)
+            
+            # cur = cur', increment iters
+            
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)

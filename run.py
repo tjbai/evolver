@@ -81,6 +81,14 @@ def get_align_ids(input_ids, output_ids):
     
     return op_ids, tok_ids, idx_ids
 
+def get_one_hot_align_ids(input_ids, output_ids, vocab_size=VOCAB_SIZE, max_len=512):
+    op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids)
+    return (
+        F.one_hot(op_ids, num_classes=5),
+        F.one_hot(tok_ids, num_classes=vocab_size),
+        F.one_hot(idx_ids, num_classes=max_len)
+    )
+
 def maybe_resample(weights, threshold, M):
     B = weights.shape[0]
     device = weights.device
@@ -132,7 +140,7 @@ def particle_filter(
     op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids) # BxNx(2N+1) each
    
     memory = cache = None 
-    for i in range(1, N): 
+    for i in range(1, N):
         forced = output_ids[:, i]
         is_prefix = prefix_mask[:, i] if prefix_mask is not None else torch.ones(B, device=device, dtype=torch.bool)
        
@@ -257,6 +265,7 @@ def sample_trajectory(model, input_ids, T, pf_params, verbose=False):
 def sample(
     model, input_ids, src,
     M, threshold, resample_at,
+    prefix_mask=None,
     verbose=False
 ):
     B, N = input_ids.shape
@@ -297,18 +306,25 @@ def sample(
         toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
         
+        is_prefix = torch.ones(B*M, device=device, dtype=torch.bool)
+        if prefix_mask is not None: is_prefix = prefix_mask[:, t].unsqueeze(1).expand(-1, M).reshape(B*M)
+        
+        ens_ops[is_prefix, t, CPY_ID] = 1
+        ens_toks[is_prefix, t, PAD_TOKEN_ID] = 1
+        ens_idxs[is_prefix, t, t] = 1
+        
         ens_ops[alive & ops.eq(EOS_ID), t, EOS_ID] = 1
         ens_toks[alive & ops.eq(EOS_ID), t, PAD_TOKEN_ID] = 1
         ens_idxs[alive & ops.eq(EOS_ID), t, 0] = 1
-       
-        alive &= ~ops.eq(EOS_ID)
-        ens_ops[torch.arange(B*M, device=device)[alive], t, ops[alive]] = 1
-        ens_toks[torch.arange(B*M, device=device)[alive], t, toks[alive]] = 1
-        ens_idxs[torch.arange(B*M, device=device)[alive], t, idxs[alive]] = 1
         
-        weights += op_probs[torch.arange(B*M), ops]
-        weights[ops.eq(INS_ID) | ops.eq(SUB_ID)] += tok_probs[torch.arange(B*M), toks][ops.eq(INS_ID) | ops.eq(SUB_ID)]
-        weights[ops.eq(CPY_ID) | ops.eq(SUB_ID)] += idx_probs[torch.arange(B*M), idxs][ops.eq(CPY_ID) | ops.eq(SUB_ID)]
+        alive &= ~ops.eq(EOS_ID)
+        ens_ops[torch.arange(B*M, device=device)[alive & ~is_prefix], t, ops[alive & ~is_prefix]] = 1
+        ens_toks[torch.arange(B*M, device=device)[alive & ~is_prefix], t, toks[alive & ~is_prefix]] = 1
+        ens_idxs[torch.arange(B*M, device=device)[alive & ~is_prefix], t, idxs[alive & ~is_prefix]] = 1
+       
+        weights[~is_prefix] += op_probs[torch.arange(B*M), ops][~is_prefix]
+        weights[(ops.eq(INS_ID) | ops.eq(SUB_ID)) & ~is_prefix] += tok_probs[torch.arange(B*M), toks][(ops.eq(INS_ID) | ops.eq(SUB_ID)) & ~is_prefix]
+        weights[(ops.eq(CPY_ID) | ops.eq(SUB_ID)) & ~is_prefix] += idx_probs[torch.arange(B*M), idxs][(ops.eq(CPY_ID) | ops.eq(SUB_ID)) & ~is_prefix]
         
         if M > 1:
             weights = (weights.view(B, M) - torch.logsumexp(weights.view(B, M), dim=-1, keepdim=True)).view(B*M)
@@ -319,11 +335,6 @@ def sample(
             ens_toks = ens_toks[torch.arange(B).unsqueeze(1), samples]
             ens_idxs = ens_idxs[torch.arange(B).unsqueeze(1), samples]
             weights[resample_mask] = 0
-            
-    # while t < N:
-    #     ens_ops[:, t, PAD_ID] = 1
-    #     ens_toks[:, t, PAD_TOKEN_ID] = 1
-    #     ens_idxs[:, t, 0] = 1
         
     weights = weights.view(B, M) 
     ens = tuple(map(lambda x: x.view(B, M, N, -1), (ens_ops, ens_toks, ens_idxs)))

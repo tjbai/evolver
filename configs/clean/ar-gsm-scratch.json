@@ -1,7 +1,6 @@
 {
     "train": "data/gsm/gsm_train_1.jsonl",
     "eval": "data/gsm/gsm_dev_1.jsonl",
-    "from_checkpoint": "/data/jeisner1/tjbai/checkpoints/ar-imdb_20240826_224624-0.pt",
 
     "d_model": 512,
     "nhead": 8,
@@ -14,10 +13,10 @@
     "lr": 3e-4,
     "warmup_percent": 0.1,
     "clip_gradients": false,
-    "train_steps": 2000,
+    "num_epochs": 5,
     "eval_steps": 100,
     "batch_size": 8,
     "grad_accum_steps": 1,
-    "checkpoint_at": 1000,
-    "eval_at": 50
+    "checkpoint_at": 0.2,
+    "eval_at": 0.05
 }

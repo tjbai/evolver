@@ -11,4 +11,3 @@ ideas:
 the model should have sufficient expressive power to generate all target sequences in a single step. our theorized improvement is because multiple steps allows the model to encode deep embeddings of reused tokens. 
 
 are we hamstringing our model by _preventing_ it from generating complete sequences at each step? does a better latent distribution model the process of revision more closely?
-

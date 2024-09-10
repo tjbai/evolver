@@ -50,8 +50,8 @@ from data import (
 from run import (
     pf_trajectory,
     apply_edits,
-    get_one_hot_align_ids,
-    sample
+    sample,
+    sample_trajectory
 )
 
 logging.basicConfig()
@@ -632,6 +632,7 @@ class DenoisingTransformer(Transformer):
         return elbo(self, eval_loader, eval_steps)
             
 if torch.cuda.is_available():
+    
     device = torch.cuda.current_device()
     gpu_properties = torch.cuda.get_device_properties(device)
     logger.info(f'RUNNING ON: {gpu_properties.name}')
@@ -728,7 +729,7 @@ def train_dagger(
     start_step=0
 ):
     for step, batch in tqdm(
-        enumerate(train_loader, start_step=start_step),
+        enumerate(train_loader, start=start_step),
         total=train_steps,
         disable=wandb.run is None
     ):
@@ -744,13 +745,15 @@ def train_dagger(
         
         times = []
         for t in range(max_iters):
+            logger.info(f'step: {t}')
             if torch.all(input_ids == output_ids): break
             
             # sample edits from q
             s = time.time()
             sampled_edits, _src = sample(model, input_ids, src, prefix_mask=prefix_mask, **pf_params)
             times.append(time.time() - s)
-           
+          
+            '''
             # get gold edits and compute loss
             edit_tgts = get_one_hot_align_ids(input_ids, output_ids, vocab_size=model.vocab_size, max_len=model.max_len)
             edit_probs, _, *_ = model.forward(input_ids, edit_tgts, src, t)
@@ -764,6 +767,7 @@ def train_dagger(
             for i in range(3):
                 tot[i] += loss[2*i]
                 n[i] += loss[2*i+1]
+            ''' 
        
         log({
             'train/per_occ_op_loss': tot[0] / n[0],
@@ -779,6 +783,7 @@ def train_dagger(
         if (step + 1) % checkpoint_at:
             checkpoint_model(model, optim, None, step)
         
+        # the best way might be to do within-seq accuracy or smth like that
         if (step + 1) % eval_at:
             logger.info('eval...')
             

@@ -1,11 +1,10 @@
 import os
+import time
 import logging
-import argparse
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 from data import (
     get_edit_tgts,
@@ -81,14 +80,6 @@ def get_align_ids(input_ids, output_ids):
     
     return op_ids, tok_ids, idx_ids
 
-def get_one_hot_align_ids(input_ids, output_ids, vocab_size=VOCAB_SIZE, max_len=512):
-    op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids)
-    return (
-        F.one_hot(op_ids, num_classes=5),
-        F.one_hot(tok_ids, num_classes=vocab_size),
-        F.one_hot(idx_ids, num_classes=max_len)
-    )
-
 def maybe_resample(weights, threshold, M):
     B = weights.shape[0]
     device = weights.device
@@ -139,10 +130,10 @@ def particle_filter(
     
     op_ids, tok_ids, idx_ids = get_align_ids(input_ids, output_ids) # BxNx(2N+1) each
    
-    memory = cache = None 
+    memory = cache = None
     for i in range(1, N):
         forced = output_ids[:, i]
-        is_prefix = prefix_mask[:, i] if prefix_mask is not None else torch.ones(B, device=device, dtype=torch.bool)
+        is_prefix = prefix_mask[:, i] if prefix_mask is not None else torch.zeros(B, device=device, dtype=torch.bool)
        
         # update pad first so we can early exit 
         pad = forced.eq(PAD_TOKEN_ID)
@@ -252,6 +243,25 @@ def sample_trajectory(model, input_ids, T, pf_params, verbose=False):
     src = None
     
     for t in range(T):
+        s = time.time()
+        edits, src = sample(model, input_ids, src, verbose=verbose, **pf_params)
+        input_ids = apply_edits(input_ids, edits)
+        traj_ids.append(input_ids)
+        for i in range(3): traj_edits[i].append(edits[i])
+        if verbose: logger.info(f'took {time.time() - s}s for iter {t}')
+        
+    return torch.stack(traj_ids), tuple(map(lambda x: torch.stack(x), traj_edits))
+
+def sample_left_to_right(model, input_ids, T, pf_params, verbose=False):
+    if 'num_particles' in pf_params:
+        pf_params['M'] = pf_params['num_particles']
+        del pf_params['num_particles']
+    
+    traj_edits = ([], [], [])
+    traj_ids = []
+    src = None
+    
+    for t in range(T):
         if verbose: logger.info(f'starting iter {t}')
         edits, src = sample(model, input_ids, src, verbose=verbose, **pf_params)
         input_ids = apply_edits(input_ids, edits)
@@ -261,15 +271,41 @@ def sample_trajectory(model, input_ids, T, pf_params, verbose=False):
         
     return torch.stack(traj_ids), tuple(map(lambda x: torch.stack(x), traj_edits))
 
+def sample_ar(model, input_ids, limit=None, verbose=False, greedy=False):
+    B, N = input_ids.shape
+    prefix_mask = ~(input_ids.eq(PAD_TOKEN_ID) | input_ids.eq(EOS_TOKEN_ID))
+    output_ids = torch.zeros(B, N, device=model.device, dtype=torch.long)
+    output_ids[:, 0] = BOS_TOKEN_ID
+    output_ids[:, 1:] = PAD_TOKEN_ID
+    
+    is_alive = torch.ones(B, device=model.device, dtype=torch.bool)
+    for i in tqdm(range(1, model.max_len if limit is None else limit), disable=not verbose):
+        if ~torch.any(is_alive): break
+        is_prefix = prefix_mask[:, i] if prefix_mask is not None else torch.zeros(B, device=model.device, dtype=torch.bool)
+        tok_probs = model(None, output_ids)[:, i]
+        
+        if greedy: tok_ids = torch.argmax(tok_probs, dim=-1)
+        else: tok_ids = torch.multinomial(F.softmax(tok_probs, dim=-1), num_samples=1)
+       
+        output_ids[is_prefix] = input_ids[is_prefix]
+        output_ids[is_alive & ~is_prefix, i] = tok_ids[is_alive & ~is_prefix].squeeze()
+        is_alive &= ~tok_ids.eq(EOS_TOKEN_ID).squeeze()
+        
+    return output_ids
+
 @torch.no_grad()
 def sample(
-    model, input_ids, src,
-    M, threshold, resample_at,
-    prefix_mask=None,
+    model,
+    input_ids,
+    src,
+    M=1,
+    threshold=0,
+    resample_at=1e9,
     verbose=False
 ):
     B, N = input_ids.shape
     device = input_ids.device
+    prefix_mask = ~(input_ids.eq(EOS_TOKEN_ID) | input_ids.eq(PAD_TOKEN_ID))
     
     _src, src_pad_mask = model.get_src(input_ids)
     if src is None: src = _src
@@ -306,7 +342,7 @@ def sample(
         toks = torch.multinomial(torch.exp(tok_probs), num_samples=1).squeeze()
         idxs = torch.multinomial(torch.exp(idx_probs), num_samples=1).squeeze()
         
-        is_prefix = torch.ones(B*M, device=device, dtype=torch.bool)
+        is_prefix = torch.zeros(B*M, device=device, dtype=torch.bool)
         if prefix_mask is not None: is_prefix = prefix_mask[:, t].unsqueeze(1).expand(-1, M).reshape(B*M)
         
         ens_ops[is_prefix, t, CPY_ID] = 1
@@ -330,13 +366,13 @@ def sample(
             weights = (weights.view(B, M) - torch.logsumexp(weights.view(B, M), dim=-1, keepdim=True)).view(B*M)
             
         if t % resample_at == 0:
-            samples, resample_mask= maybe_resample(weights.view(B, M), threshold, M)
+            samples, resample_mask = maybe_resample(weights.view(B, M), threshold, M)
             ens_ops = ens_ops[torch.arange(B).unsqueeze(1), samples]
             ens_toks = ens_toks[torch.arange(B).unsqueeze(1), samples]
             ens_idxs = ens_idxs[torch.arange(B).unsqueeze(1), samples]
-            weights[resample_mask] = 0
+            weights.view(B, M)[resample_mask] = 0
         
-    weights = weights.view(B, M) 
+    weights = weights.view(B, M)
     ens = tuple(map(lambda x: x.view(B, M, N, -1), (ens_ops, ens_toks, ens_idxs)))
     
     samples = torch.multinomial(torch.exp(weights), 1).squeeze() if M > 1 else torch.zeros(B, dtype=torch.long)
@@ -365,42 +401,6 @@ def apply_edits(input_ids, edits):
     res[eos_mask] = EOS_TOKEN_ID
     
     return res
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('input_file')
-    parser.add_argument('--model', default='gpt2')
-    return parser.parse_args()
-
-@torch.no_grad()
-def compute_ppl(model, tokenizer, text, device):
-    encodings = tokenizer(text, return_tensors='pt')
-    input_ids = encodings.input_ids.to(device)
-    outputs = model(input_ids, labels=input_ids.clone())
-    loss = outputs.loss
-    return torch.exp(loss).item(), input_ids.numel()
-
-def main():
-    args = parse_args()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    model = GPT2LMHeadModel.from_pretrained(args.model).to(device)
-    tokenizer = GPT2Tokenizer.from_pretrained(args.model)
-   
-    tot_ppl = 0
-    tot_n = 0 
-    with open(args.input_file, 'r') as f:
-        for line in tqdm(f):
-            line = line.strip()
-            if not line: continue
-            ppl_pt, n = compute_ppl(model, tokenizer, line, device)
-            tot_ppl += ppl_pt * n
-            tot_n += n
-            
-    logger.info(f'avg ppl: {tot_ppl / tot_n}')
-
-if __name__ == '__main__':
-    main()
 
 ### to deprecate
 

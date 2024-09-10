@@ -14,6 +14,7 @@ from simalign import SentenceAligner
 from transformers import BertTokenizer
 from torch.utils.data import Dataset, Sampler, DataLoader
 
+from utils import BT, ALIGN
 from const import (
     PAD_TOKEN_ID, BOS_TOKEN_ID, VOCAB_SIZE,
     INS_ID, CPY_ID, SUB_ID, EOS_ID, PAD_ID,
@@ -269,9 +270,46 @@ def elaborate(traj_edit_tgts, batch_first=True):
     if not batch_first: traj_edit_tgts = tuple(map(lambda x: x.transpose(0, 1), traj_edit_tgts))
     B, T, max_len, _ = traj_edit_tgts[0].shape
     kernel = lambda b, t, i: to_str(*map(lambda x: torch.argmax(x[b, t, i]).item(), traj_edit_tgts))
-    return [[' '.join([kernel(b, t, i) for i  in range(max_len)]) for t in range(T)] for b in range(B)]
+    return [[' '.join(filter(lambda x: x != 'PAD', [kernel(b, t, i) for i  in range(max_len)])) for t in range(T)] for b in range(B)]
     
 ### alignment utilities
+
+def generate_prefix_alignment(input_path, output_dir, cache_prefix, max_len=512):
+    with open(input_path, 'r') as f:
+        for i, line in tqdm(enumerate(f.readlines())):
+            if not line.strip(): continue
+            traj, _ = json.loads(line)
+            ids = get_input_ids(traj, max_len=max_len, tokenizer=BT)
+            
+            traj_op_tgts = []
+            traj_tok_tgts = []
+            traj_idx_tgts = []
+            
+            for j, seq in enumerate(ids[1:], start=1):
+                N = len(ids[j-1]) - 2
+                M = len(seq) - 2 - N
+                
+                op_tgts = [INS_ID] + [CPY_ID for _ in range(N)] + [INS_ID for _ in range(M)] + [EOS_ID]
+                tok_tgts = [BOS_TOKEN_ID] + [PAD_TOKEN_ID for _ in range(N)] + [tok for tok in seq[1+N:1+N+M]] + [PAD_TOKEN_ID]
+                idx_tgts = [0]  + [i for i in range(1, N+1)] + [0 for _ in range(M)] + [0]
+            
+                op_tgts += [PAD_ID for _ in range(max_len-len(seq))]
+                tok_tgts += [PAD_TOKEN_ID for _ in range(max_len-len(seq))]
+                idx_tgts += [0 for _ in range(max_len-len(seq))]
+                
+                traj_op_tgts.append(op_tgts)
+                traj_tok_tgts.append(tok_tgts)
+                traj_idx_tgts.append(idx_tgts)
+                
+            traj_op_tgts = torch.tensor(traj_op_tgts)
+            traj_tok_tgts = torch.tensor(traj_tok_tgts)
+            traj_idx_tgts = torch.tensor(traj_idx_tgts)
+            
+            with open(f'{output_dir}/{cache_prefix}_{i}.zst', 'wb') as f:
+                pickle.dump((traj_op_tgts, traj_tok_tgts, traj_idx_tgts), f)
+
+def get_simalign_tgts(s1, s2):
+    return get_edit_tgts(generate_edits(BT.decode(s1), BT.decode(s2), BT, ALIGN))
 
 def generate_alignment(s1, s2, aligner):
     if s1 == '': return

@@ -47,6 +47,7 @@ def batch_decode(input_ids):
 def run(model, loader, output_file, limit):
     with open(output_file, 'w') as f:
         for i, (input_ids, _) in tqdm(enumerate(loader)):
+            input_ids = input_ids.to(model.device)
             if limit is not None and i >= limit: break
             if isinstance(model, PointerStyleEvolver):
                 output_ids, _edits = sample_trajectory(model, input_ids, T=6, pf_params={}, verbose=True)

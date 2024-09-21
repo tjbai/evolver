@@ -315,7 +315,7 @@ def sample(
     src_pad_mask = src_pad_mask.unsqueeze(1).expand(-1, M, -1).reshape(B*M, -1)
     
     weights = torch.zeros(B*M, device=device)
-    alive = torch.ones(B*M, dtype=torch.bool)
+    alive = torch.ones(B*M, dtype=torch.bool, device=device)
     
     ens_ops = torch.zeros(B*M, N, 5, dtype=torch.long, device=device)
     ens_toks = torch.zeros(B*M, N, VOCAB_SIZE, dtype=torch.long, device=device)

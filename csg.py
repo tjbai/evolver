@@ -410,6 +410,10 @@ def train(config):
     optim = AdamW(model.parameters(), lr=config['lr'])
 
     start_step = load_checkpoint(model, optim, config)
+    
+    logger.info('eval sanity check') 
+    evaluate(model, eval_loader, device, 1)
+    logger.info('passed!')
 
     model.train()
     for step, batch in tqdm(

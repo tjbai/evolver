@@ -45,7 +45,8 @@ from data import (
     InfiniteSampler,
     unsupervised_loader,
     supervised_loader,
-    elaborate
+    elaborate,
+    get_simalign_tgts
 )
 from run import (
     pf_trajectory,
@@ -748,26 +749,27 @@ def train_dagger(
             logger.info(f'step: {t}')
             if torch.all(input_ids == output_ids): break
             
-            # sample edits from q
+            # sample edits from current model
             s = time.time()
-            sampled_edits, _src = sample(model, input_ids, src, prefix_mask=prefix_mask, **pf_params)
+            sampled_edits, _src = sample(model, input_ids, src, **pf_params)
             times.append(time.time() - s)
-          
-            '''
-            # get gold edits and compute loss
-            edit_tgts = get_one_hot_align_ids(input_ids, output_ids, vocab_size=model.vocab_size, max_len=model.max_len)
+            
+            edit_tgts = get_simalign_tgts(input_ids, output_ids)
+            print(edit_tgts[0].shape)
+            
             edit_probs, _, *_ = model.forward(input_ids, edit_tgts, src, t)
             loss = model.loss(edit_probs, edit_tgts, ignore_mask=prefix_mask[:, 1:])
             
-            # apply q edits and update embeddings
-            input_ids = apply_edits(input_ids, sampled_edits)
-            src = _src
+            print(loss)
+            
+            # # apply q edits and update embeddings
+            # input_ids = apply_edits(input_ids, sampled_edits)
+            # src = _src
            
-            # accumulate loss 
-            for i in range(3):
-                tot[i] += loss[2*i]
-                n[i] += loss[2*i+1]
-            ''' 
+            # # accumulate loss
+            # for i in range(3):
+            #     tot[i] += loss[2*i]
+            #     n[i] += loss[2*i+1]
        
         log({
             'train/per_occ_op_loss': tot[0] / n[0],

@@ -18,3 +18,5 @@ could possibly be pretrained in some form without deeper embeddings and then fin
 
 pretrain on noised-up dependency trees to predict constituents
 
+MLM objective but on dependency trees and with constituents
+

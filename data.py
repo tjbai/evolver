@@ -308,8 +308,23 @@ def generate_prefix_alignment(input_path, output_dir, cache_prefix, max_len=512)
             with open(f'{output_dir}/{cache_prefix}_{i}.zst', 'wb') as f:
                 pickle.dump((traj_op_tgts, traj_tok_tgts, traj_idx_tgts), f)
 
-def get_simalign_tgts(s1, s2):
-    return get_edit_tgts(generate_edits(BT.decode(s1), BT.decode(s2), BT, ALIGN))
+def get_simalign_tgts(s1, s2, max_len=512):
+    if len(s1.shape) == 1:
+        s1 = s1.unsqueeze(0)
+        s2 = s2.unsqueeze(0)
+    
+    res = ([], [], [])
+    
+    for s1, s2 in zip(s1, s2):
+        edit_tgts = tuple(map(
+            lambda x: F.one_hot(torch.tensor(x[0]).unsqueeze(0), num_classes=x[1]),
+            zip(get_edit_tgts(generate_edits(BT.decode(s1)[1:], BT.decode(s2)[1:], BT, ALIGN), max_len=512), [5, VOCAB_SIZE, max_len])
+        ))
+        
+        for i in range(3):
+            res[i].append(edit_tgts[i])
+            
+    return tuple(map(lambda x: torch.stack(x), res))
 
 def generate_alignment(s1, s2, aligner):
     if s1 == '': return
@@ -322,13 +337,17 @@ def generate_alignment(s1, s2, aligner):
         yield src, tgt
 
 def generate_edits(s1, s2, tokenizer, aligner):
+    # i hate this hack
+    if (end := s1.find('[SEP]')) != -1: s1 = s1[:end-1]
+    if (end := s2.find('[SEP]')) != -1: s2 = s2[:end-1]
+    
     s1_ids = tokenizer.encode(s1.lower())[1:-1]
     s2_ids = tokenizer.encode(s2.lower())[1:-1]
   
     # always start with BOS
     yield INS_ID, BOS_TOKEN_ID, 0
     
-    last = -1 
+    last = -1
     for src, tgt in generate_alignment(s1, s2, aligner):
         
         # insert everything since last seen

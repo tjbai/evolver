@@ -9,7 +9,7 @@ from tqdm import tqdm
 from ordered_set import OrderedSet
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 
-detok = TreebankWordDetokenizer() 
+detok = TreebankWordDetokenizer()
 
 def flip(w):
     return random.choices([True, False], weights=[w, 1-w])[0]

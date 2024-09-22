@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from const import *
 from embed import SinusoidalEmbedding
+from utils import compute_tgt
 from trans import TransformerEncoder, TransformerEncoderLayer, CausalTransformerDecoder, CausalTransformerDecoderLayer, MultiheadPointer
 
 logging.basicConfig(level=logging.INFO)
@@ -241,9 +242,10 @@ class Evolver(nn.Module):
     def __init__(
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
-        encoder_layers, decoder_layers,
-        vocab_size, max_len
+        encoder_layers, decoder_layers, vocab_size, max_len, pad_token_id, name
     ):
+        super().__init__()
+
         self.d_model = d_model
         self.dim_feedforward = dim_feedforward
         self.nhead = nhead
@@ -251,6 +253,8 @@ class Evolver(nn.Module):
         self.layer_norm_eps = layer_norm_eps
         self.vocab_size = vocab_size
         self.max_len = max_len
+        self.pad_token_id = pad_token_id
+        self.name = name
         
         t_params = {
             'd_model': d_model,
@@ -259,41 +263,97 @@ class Evolver(nn.Module):
             'dropout': dropout,
             'layer_norm_eps': layer_norm_eps
         }
+        
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
        
         encoder_layer = TransformerEncoderLayer(**t_params)
         decoder_layer = CausalTransformerDecoderLayer(**t_params)
         self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
         self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
-        
-        self.img_enocder = ImageEncoder(d_model)
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
+        self.img_encoder = ImageEncoder(d_model, 4)
         
         self.op_head = nn.Linear(t_params['d_model'], 5)
         self.tok_head = nn.Linear(t_params['d_model'], vocab_size)
-        self.pointer = MultiheadPointer(**t_params)
+        self.pointer = MultiheadPointer(
+            embed_dim=d_model,
+            num_heads=nhead,
+            dropout=dropout,
+            bias=True,
+            add_bias_kv=False,
+            add_zero_attn=False
+        )
         
-    def get_src(self, x):
-        pad_mask = x.eq(PAD_TOKEN_ID)
-        x = self.embedding(x) * math.sqrt(self.t_params['d_model'])
+    def embed(self, x):
+        x = self.embedding(x) * math.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
-        return x, pad_mask
+        return x
     
-    def forward(
-        self,
-        input_ids, input_img, edit_tgts,
-        src=None, memory=None, cache=None
-    ):
-        B, N = input_ids.shape
-        assert N <= self.max_len
-        assert B == input_img.shape[0]
+    def compute_tgt(self, input_ids, edit_ids, mem):
+        op_ids, tok_ids, idx_ids = edit_ids
+        B, N = op_ids.shape
         
-        _src, pad_mask = self.get_src(input_ids)
-        tok_src = src if src is not None else _src
-        img_src = self.img_encoder(input_img)
-        src = torch.stack([img_src, tok_src], dim=1)
+        ins_mask = op_ids.eq(0)
+        cpy_mask = op_ids.eq(1)
+        sub_mask = op_ids.eq(2)
         
-        # TODO -- finish
+        tgt = torch.zeros(B, N, self.d_model, device=self.device)
+        mem = self.positional_embedding(mem, d=-1)
+        
+        permuted_mem = mem[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
+        permuted_input_ids = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
+            
+        tgt[cpy_mask] = permuted_mem[cpy_mask]
+        
+        if ins_mask.any():
+            tgt[ins_mask] = self.token_embedding(tok_ids[ins_mask]) * math.sqrt(self.d_model)
+        
+        if torch.any(sub_mask):
+            old_embeds = self.token_embedding(permuted_input_ids[sub_mask]) * math.sqrt(self.d_model)
+            new_embeds = self.token_embedding(tok_ids[sub_mask]) * math.sqrt(self.d_model)
+            tgt[sub_mask] = permuted_mem[sub_mask] - old_embeds + new_embeds
+        
+        tgt = self.positional_embedding(tgt, d=1)
+        return tgt
+        
+    def apply_edits(self, input_ids, edit_ids):
+        op_ids, tok_ids, idx_ids = edit_ids
+        B = input_ids.shape[0]
+        res = torch.zeros(B, op_ids.shape[1], dtype=torch.long, device=input_ids.device)
+
+        ins_mask = op_ids.eq(INS_ID) | op_ids.eq(SUB_ID)
+        res[ins_mask] = tok_ids[ins_mask]
+        
+        cpy_mask = op_ids.eq(CPY_ID)
+        permuted_inputs = input_ids[torch.arange(B).view(-1, 1), idx_ids]
+        res[cpy_mask] = permuted_inputs[cpy_mask]
+        
+        return res
+    
+    def forward(self, batch, static=False, src=None, mem=None, cache=None):
+        imgs, input_ids, edit_ids = batch 
+        B = input_ids.shape[0]
+        device = input_ids.device
+        
+        attn_mask = input_ids.eq(self.pad_token_id)
+        attn_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), attn_mask], dim=1)
+        
+        tok_embedding = self.embed(input_ids)
+        img_embedding = self.img_encoder(imgs)
+        src = torch.cat([img_embedding, tok_embedding], dim=1)
+        tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if static else self.compute_tgt(input_ids, edit_ids)
+        
+        mem = self.encoder(src, src_key_padding_mask=attn_mask)
+        h, *_ = self.decoder(tgt, mem, cache=cache, memory_key_padding_mask=attn_mask)
+        
+        op_probs = F.log_softmax(self.op_head(h), dim=-1)
+        tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
+        
+        idx_weights = self.pointer(tgt, mem, key_padding_mask=attn_mask)
+        idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))
+        idx_probs = F.log_softmax(idx_weights, dim=-1)
+        
+        return op_probs, tok_probs, idx_probs[:, :, 4:]
         
 class DecoderOnlyTransformer(nn.Module):
     
@@ -314,7 +374,7 @@ class DecoderOnlyTransformer(nn.Module):
         self.pad_token_id = pad_token_id
         self.name = name
         
-        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
         
         decoder_layer = TransformerEncoderLayer(
@@ -326,19 +386,21 @@ class DecoderOnlyTransformer(nn.Module):
         )
 
         self.decoder = TransformerEncoder(decoder_layer, decoder_layers)
-        self.img_encoder = ImageEncoder(d_model, 4)
+        self.img_encoder = ImageEncoder(d_model, 3) # INS, CPY, SUB
         self.tok_head = nn.Linear(d_model, vocab_size)
-    
+   
     def embed(self, x):
-        x = self.embedding(x) * math.sqrt(self.d_model)
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x
     
     def forward(self, batch):
         imgs, input_ids, pad_mask = batch.values()
-        B = input_ids.shape[0]
-        pad_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool), pad_mask], dim=1)
-        causal_mask = T.generate_square_subsequent_mask(input_ids.shape[1]+4, input_ids.device, dtype=torch.bool)
+        B, N = input_ids.shape[0]
+        device = input_ids.device
+
+        pad_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), pad_mask], dim=1)
+        causal_mask = T.generate_square_subsequent_mask(N+4, dtype=torch.bool, device=device)
         causal_mask[:, :4] = False
         
         tok_embedding = self.embed(input_ids)

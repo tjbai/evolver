@@ -8,6 +8,7 @@ import argparse
 from PIL import Image, ImageDraw, ImageChops
 from functools import wraps
 from datetime import datetime
+from collections import deque
 
 import torch
 import torch.nn as nn
@@ -22,7 +23,6 @@ from tqdm import tqdm
 
 from const import *
 from embed import SinusoidalEmbedding
-from utils import compute_tgt
 from trans import TransformerEncoder, TransformerEncoderLayer, CausalTransformerDecoder, CausalTransformerDecoderLayer, MultiheadPointer
 
 logging.basicConfig(level=logging.INFO)
@@ -85,9 +85,9 @@ class CSG:
         return self._parse(program.split())
     
     def _parse(self, tokens):
-        if tokens[1] == 'Circle': return self.parse_circle(tokens)
-        if tokens[1] == 'Quad': return self.parse_quad(tokens)
-        return self.parse_binop(tokens)
+        if tokens[1] == 'Circle': return {'type': 's', 'value': self.parse_circle(tokens)}
+        if tokens[1] == 'Quad': return {'type': 's', 'value': self.parse_quad(tokens)}
+        return {'type': 's', 'value': self.parse_binop(tokens)}
 
     def find_split(self, tokens):
         count = 0
@@ -102,12 +102,15 @@ class CSG:
             if len(res) == expected: break
             if token == match: res.append(i)
         return res
+    
+    def parse_op(self, token):
+        return {'type': 'op', 'value': token}
 
     def parse_binop(self, tokens):
         i = self.find_split(tokens[2:-1])
         return {
             'type': 'binop',
-            'op': tokens[1],
+            'op': self.parse_op(tokens[1]),
             'left': self._parse(tokens[2:2+i]),
             'right': self._parse(tokens[2+i:-1])
         }
@@ -139,11 +142,13 @@ class CSG:
         return {'type': 'angle', 'value': tokens[2]}
     
     def expand(self, node, cur_depth=0, max_depth=1e9):
-        if max_depth == 0: return 's'
+        ps = {'cur_depth': cur_depth+1, 'max_depth': max_depth}
         if cur_depth >= max_depth: return node['type']
-        if node['type'] == 'binop': return f"( {node['op']} {self.expand(node['left'], cur_depth+1, max_depth)} {self.expand(node['right'], cur_depth+1, max_depth)} )"
-        if node['type'] == 'circle': return f"( Circle {self.expand(node['r'], cur_depth+1, max_depth)} {self.expand(node['x'], cur_depth+1, max_depth)} {self.expand(node['y'], cur_depth+1, max_depth)} )"
-        if node['type']  == 'quad': return f"( Quad {self.expand(node['x'], cur_depth+1, max_depth)} {self.expand(node['y'], cur_depth+1, max_depth)} {self.expand(node['w'], cur_depth+1, max_depth)} {self.expand(node['h'], cur_depth+1, max_depth)} )"
+        if node['type'] == 's': return self.expand(node['value'], **ps)
+        if node['type'] == 'op': return node['value']
+        if node['type'] == 'binop': return f"( {self.expand(node['op'], **ps)} {self.expand(node['left'], **ps)} {self.expand(node['right'], **ps)} )"
+        if node['type'] == 'circle': return f"( Circle {self.expand(node['r'], **ps)} {self.expand(node['x'], **ps)} {self.expand(node['y'], **ps)} )"
+        if node['type']  == 'quad': return f"( Quad {self.expand(node['x'], **ps)} {self.expand(node['y'], **ps)} {self.expand(node['w'], **ps)} {self.expand(node['h'], **ps)} )"
         if node['type'] == 'num': return f"( Num {node['value']} )"
         if node['type'] == 'angle': return f"( Angle {node['value']} )"
         
@@ -160,13 +165,16 @@ class CSG:
                 left = self._draw_tree(image.copy(), node['left'], size)
                 right = self._draw_tree(image.copy(), node['right'], size)
                 image = ImageChops.add(left, right)
+
             elif node['op'] == 'Sub':
                 left = self._draw_tree(Image.new('1', size, color='black'), node['left'], size)
                 right = self._draw_tree(Image.new('1', size, color='black'), node['right'], size)
                 image = ImageChops.add(image, ImageChops.difference(left, right))
+                
         elif node['type'] == 'circle':
             draw = ImageDraw.Draw(image)
             self._draw_circle(draw, node, size)
+
         elif node['type'] == 'quad':
             draw = ImageDraw.Draw(image)
             self._draw_quad(draw, node, size)
@@ -218,36 +226,105 @@ class CSGDataset(Dataset):
         self.transform = transforms.Compose([transforms.ToTensor()])
 
     def __len__(self):
-        return float('inf')
+        return int(1e9)
 
     def __getitem__(self, _):
         program = self.csg.generate(max_depth=self.max_depth)
-        image = self.csg.render(program, size=self.size)
-        image_tensor = self.transform(image).float()
+        img = self.csg.render(program, size=self.size)
+        img_tensor = self.transform(img).float()
         input_ids = torch.tensor(self.csg.tokenize(program), dtype=torch.long)
-        return {'image': image_tensor, 'input_ids': input_ids}
+        return {'img': img_tensor, 'input_ids': input_ids, 'program': program}
 
     def collate_fn(self, batch):
-        images = torch.stack([item['image'] for item in batch])
+        imgs = torch.stack([item['img'] for item in batch])
         N = max(len(item['input_ids']) for item in batch)
         input_ids = torch.full((len(batch), N), self.csg.tok_to_id['PAD'], dtype=torch.long)
         for i, item in enumerate(batch): input_ids[i, :len(item['input_ids'])] = item['input_ids']
-        return {'images': images, 'input_ids': input_ids, 'attn_mask': input_ids.eq(self.csg.tok_to_id['PAD'])}
+        return {'imgs': imgs, 'input_ids': input_ids, 'attn_mask': input_ids.eq(self.csg.tok_to_id['PAD'])}
     
-class CSGTreeDataset(Dataset):
+class CSGTreeDataset(CSGDataset):
     
-    def __init__(self, size=(128, 128), max_depth=4, num_samples=1000):
-        self.csg = CSG()
-        self.size = size
-        self.max_depth = max_depth
-        self.num_samples = num_samples
-        self.transform = transforms.Compose([transforms.ToTensor()])
+    def to_traj(self, tree):
+        _, CPY, SUB = 0, 1, 2
+        t2i = self.csg.tok_to_id
         
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, _):
-        pass
+        traj = []
+        i = 0
+        while 1:
+            cur = self.csg.expand(tree, max_depth=i)
+            if traj and cur == traj[-1]: break
+            traj.append(cur)
+            i += 1
+            
+        traj = list(map(lambda x: x.split(), traj))
+        traj_op_ids = torch.full((len(traj)-1, len(traj[-1])+2), -1)
+        traj_tok_ids = torch.full((len(traj)-1, len(traj[-1])+2), -1)
+        traj_idx_ids = torch.full((len(traj)-1, len(traj[-1])+2), -1)
+        
+        for i in range(len(traj)-1):
+            cur = [(CPY, -1, 0)]
+            a, b = traj[i], traj[i+1]
+            j = k = 0
+            
+            for j in range(len(a)):
+                if a[j] == b[k]:
+                    cur.append((CPY, -1, j+1))
+                    k += 1
+                else:
+                    if a[j] == 'binop': step = 5
+                    elif a[j] == 'quad': step = 7
+                    elif a[j] == 'circle': step = 6
+                    elif a[j] in {'s', 'op'}: step = 1
+                    elif a[j] in {'num', 'angle'}: step = 4
+                    
+                    for _ in range(step):
+                        cur.append((SUB, t2i[b[k]], j+1))
+                        k += 1
+            
+            cur.append((CPY, -1, len(a)+1))
+            op_ids, tok_ids, idx_ids = map(lambda x: torch.tensor(x), zip(*cur))
+            
+            traj_op_ids[i, :len(op_ids)] = op_ids
+            traj_tok_ids[i, :len(tok_ids)] = tok_ids
+            traj_idx_ids[i, :len(idx_ids)] = idx_ids
+                
+        return traj_op_ids, traj_tok_ids, traj_idx_ids
+    
+    def collate_fn(self, batch):
+        N = max(len(item['input_ids']) for item in batch)
+        B = len(batch)
+        
+        input_ids = torch.full((B, N), self.csg.tok_to_id['PAD'], dtype=torch.long)
+        for i, item in enumerate(batch): input_ids[i, :len(item['input_ids'])] = item['input_ids']
+        
+        ops = []
+        toks = []
+        idxs = []
+        T = -1
+        for item in batch:
+            tree = self.csg.parse(item['program'])
+            op, tok, idx = self.to_traj(tree)
+            T = max(T, op.shape[0])
+            ops.append(op)
+            toks.append(tok)
+            idxs.append(idx)
+            
+        bt_op_ids = torch.zeros((B, T, N))
+        bt_tok_ids = torch.zeros((B, T, N))
+        bt_idx_ids = torch.zeros((B, T, N))
+        
+        for i in range(B):
+            op, tok, idx = ops[i], toks[i], idxs[i]
+            bt_op_ids[i, :op.shape[0], :op.shape[1]] = op
+            bt_tok_ids[i, :tok.shape[0], :tok.shape[1]] = tok
+            bt_idx_ids[i, :idx.shape[0], :idx.shape[1]] = idx
+            
+        return {
+            'imgs': torch.stack([item['img'] for item in batch]),
+            'input_ids': input_ids,
+            'edit_ids': (bt_op_ids, bt_tok_ids, bt_idx_ids),
+            'programs': [item['program'] for item in batch]
+        }
 
 class SyntaxDecoder(nn.Module):
     pass
@@ -342,6 +419,7 @@ class Evolver(nn.Module):
         
         cpy_mask = op_ids.eq(CPY_ID)
         permuted_inputs = input_ids[torch.arange(B).view(-1, 1), idx_ids]
+        
         res[cpy_mask] = permuted_inputs[cpy_mask]
         
         return res

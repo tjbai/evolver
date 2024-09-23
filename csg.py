@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from const import *
 from embed import SinusoidalEmbedding
-from trans import TransformerEncoder, TransformerEncoderLayer, CausalTransformerDecoder, CausalTransformerDecoderLayer, MultiheadPointer
+from trans import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer, MultiheadPointer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -309,9 +309,9 @@ class CSGTreeDataset(CSGDataset):
             toks.append(tok)
             idxs.append(idx)
             
-        bt_op_ids = torch.zeros((B, T, N))
-        bt_tok_ids = torch.zeros((B, T, N))
-        bt_idx_ids = torch.zeros((B, T, N))
+        bt_op_ids = torch.full((B, T, N), -1)
+        bt_tok_ids = torch.full((B, T, N), -1)
+        bt_idx_ids = torch.full((B, T, N), -1)
         
         for i in range(B):
             op, tok, idx = ops[i], toks[i], idxs[i]
@@ -322,19 +322,18 @@ class CSGTreeDataset(CSGDataset):
         return {
             'imgs': torch.stack([item['img'] for item in batch]),
             'input_ids': input_ids,
-            'edit_ids': (bt_op_ids, bt_tok_ids, bt_idx_ids),
+            'edit_ids': (bt_op_ids.long(), bt_tok_ids.long(), bt_idx_ids.long()),
             'programs': [item['program'] for item in batch]
         }
-
-class SyntaxDecoder(nn.Module):
-    pass
 
 class Evolver(nn.Module):
     
     def __init__(
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
-        encoder_layers, decoder_layers, vocab_size, max_len, pad_token_id, name
+        encoder_layers, decoder_layers, vocab_size, max_len,
+        pad_token_id, bos_token_id, eos_token_id, root_id,
+        static=False
     ):
         super().__init__()
 
@@ -346,7 +345,10 @@ class Evolver(nn.Module):
         self.vocab_size = vocab_size
         self.max_len = max_len
         self.pad_token_id = pad_token_id
-        self.name = name
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.root_id = root_id
+        self.static = static
         
         t_params = {
             'd_model': d_model,
@@ -356,16 +358,16 @@ class Evolver(nn.Module):
             'layer_norm_eps': layer_norm_eps
         }
         
-        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
        
         encoder_layer = TransformerEncoderLayer(**t_params)
-        decoder_layer = CausalTransformerDecoderLayer(**t_params)
+        decoder_layer = TransformerDecoderLayer(**t_params)
         self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
-        self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
+        self.decoder = TransformerDecoder(decoder_layer, decoder_layers)
         self.img_encoder = ImageEncoder(d_model, 4)
         
-        self.op_head = nn.Linear(t_params['d_model'], 5)
+        self.op_head = nn.Linear(t_params['d_model'], 3)
         self.tok_head = nn.Linear(t_params['d_model'], vocab_size)
         self.pointer = MultiheadPointer(
             embed_dim=d_model,
@@ -377,7 +379,7 @@ class Evolver(nn.Module):
         )
         
     def embed(self, x):
-        x = self.embedding(x) * math.sqrt(self.d_model)
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x
     
@@ -389,10 +391,10 @@ class Evolver(nn.Module):
         cpy_mask = op_ids.eq(1)
         sub_mask = op_ids.eq(2)
         
-        tgt = torch.zeros(B, N, self.d_model, device=self.device)
+        tgt = torch.zeros(B, N, self.d_model, device=input_ids.device)
         mem = self.positional_embedding(mem, d=-1)
         
-        batch_indices = torch.arange(B, device=self.device).unsqueeze(1)
+        batch_indices = torch.arange(B, device=input_ids.device).unsqueeze(1)
         permuted_mem = mem[batch_indices, idx_ids]
         permuted_input_ids = input_ids[batch_indices, idx_ids]
             
@@ -424,21 +426,20 @@ class Evolver(nn.Module):
         
         return res
     
-    def forward(self, batch, static=False, src=None, mem=None, cache=None):
-        imgs, input_ids, edit_ids = batch 
+    def forward(self, batch, src=None, mem=None, return_tgt=True):
+        imgs, input_ids, edit_ids = batch
         B = input_ids.shape[0]
         device = input_ids.device
         
         attn_mask = input_ids.eq(self.pad_token_id)
         attn_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), attn_mask], dim=1)
         
-        tok_embedding = self.embed(input_ids)
         img_embedding = self.img_encoder(imgs)
-        src = torch.cat([img_embedding, tok_embedding], dim=1)
-        tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if static else self.compute_tgt(input_ids, edit_ids)
+        src = torch.cat([img_embedding, self.embed(input_ids) if src is None else src], dim=1)
         
-        mem = self.encoder(src, src_key_padding_mask=attn_mask)
-        h, *_ = self.decoder(tgt, mem, cache=cache, memory_key_padding_mask=attn_mask)
+        mem = self.encoder(src, src_key_padding_mask=attn_mask) if mem is None else mem
+        tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if self.static else self.compute_tgt(input_ids, edit_ids, mem[:, 4:])
+        h, _ = self.decoder(tgt, mem, memory_key_padding_mask=attn_mask)
         
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
@@ -447,7 +448,44 @@ class Evolver(nn.Module):
         idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         
+        if return_tgt:
+            return (op_probs, tok_probs, idx_probs[:, :, 4:]), tgt
+        
         return op_probs, tok_probs, idx_probs[:, :, 4:]
+    
+    def step(self, batch):
+        imgs = batch['imgs']
+        B, N = batch['input_ids'].shape
+        edit_ids = batch['edit_ids']
+        T = edit_ids[0].shape[1]
+        
+        input_ids = torch.full((B, N), self.pad_token_id)
+        input_ids[:, 0] = self.bos_token_id
+        input_ids[:, 1] = self.root_id
+        input_ids[:, 2] = self.eos_token_id
+        
+        src = None
+        op_loss = op_n = 0
+        tok_loss = tok_n = 0
+        idx_loss = idx_n = 0
+        
+        for i in range(T):
+            (op_probs, tok_probs, idx_probs), src = self.forward(
+                (imgs, input_ids, map(lambda x: x[:, i], edit_ids)),
+                src=src,
+                return_tgt=True
+            )
+            
+            op_loss += F.nll_loss(op_probs[:, :-1].transpose(1, 2), edit_ids[0][:, i, 1:], ignore_index=-1, reduction='sum')
+            op_n += torch.sum(edit_ids[0][:, i, 1:] != -1)
+            
+            tok_loss += F.nll_loss(tok_probs[:, :-1].transpose(1, 2), edit_ids[1][:, i, 1:], ignore_index=-1, reduction='sum')
+            tok_n += torch.sum(edit_ids[1][:, i, 1:] != -1)
+            
+            idx_loss += F.nll_loss(idx_probs[:, :-1].transpose(1, 2), edit_ids[2][:, i, 1:], ignore_index=-1, reduction='sum')
+            idx_n += torch.sum(edit_ids[2][:, i, 1:] != -1)
+            
+        return op_loss / op_n, tok_loss / tok_n, idx_loss / idx_n
         
 class DecoderOnlyTransformer(nn.Module):
     
@@ -480,7 +518,7 @@ class DecoderOnlyTransformer(nn.Module):
         )
 
         self.decoder = TransformerEncoder(decoder_layer, decoder_layers)
-        self.img_encoder = ImageEncoder(d_model, 3) # INS, CPY, SUB
+        self.img_encoder = ImageEncoder(d_model, 4) # INS, CPY, SUB
         self.tok_head = nn.Linear(d_model, vocab_size)
    
     def embed(self, x):
@@ -490,10 +528,11 @@ class DecoderOnlyTransformer(nn.Module):
     
     def forward(self, batch):
         imgs, input_ids, pad_mask = batch.values()
-        B, N = input_ids.shape[0]
+        B, N = input_ids.shape
         device = input_ids.device
 
         pad_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), pad_mask], dim=1)
+        
         causal_mask = T.generate_square_subsequent_mask(N+4, dtype=torch.bool, device=device)
         causal_mask[:, :4] = False
         
@@ -508,19 +547,42 @@ class DecoderOnlyTransformer(nn.Module):
         # remove first 4 image tokens 
         return tok_probs[:, 4:]
     
+    def step(self, batch):
+        tok_probs = self.forward(batch)
+        loss = F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['input_ids'][:, 1:], ignore_index=self.pad_token_id)
+        return loss
+    
 def init_model(config, csg):
-    return DecoderOnlyTransformer(
+    if config['model_type'] == 'decoder_only':
+        return DecoderOnlyTransformer(
+            d_model=config['d_model'],
+            dim_feedforward=config['dim_feedforward'],
+            nhead=config['nhead'],
+            dropout=config['dropout'],
+            layer_norm_eps=config['layer_norm_eps'],
+            decoder_layers=config['decoder_layers'],
+            vocab_size=csg.vocab_size,
+            max_len=config['max_len'],
+            pad_token_id=csg.tok_to_id['PAD'],
+            name=config['name']
+        ).to(config['device'])
+    
+    return Evolver(
         d_model=config['d_model'],
         dim_feedforward=config['dim_feedforward'],
         nhead=config['nhead'],
         dropout=config['dropout'],
         layer_norm_eps=config['layer_norm_eps'],
         decoder_layers=config['decoder_layers'],
+        encoder_layers=config['encoder_layers'],
         vocab_size=csg.vocab_size,
         max_len=config['max_len'],
         pad_token_id=csg.tok_to_id['PAD'],
-        name=config['name']
-    ).to(config['device'])
+        bos_token_id=csg.tok_to_id['BOS'],
+        eos_token_id=csg.tok_to_id['EOS'],
+        root_id=csg.tok_to_id['s'],
+        static=config.get('static', False)
+    )
     
 def load_checkpoint(model, optimizer, config):
     if config['from_checkpoint']:
@@ -536,12 +598,19 @@ def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f"{model.name}_{step}.pt")
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
     
-# @timing
-def train_step(model, batch, device):
-    batch = {k: v.to(device) for k, v in batch.items()}
-    tok_probs = model(batch)
-    loss = F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['input_ids'][:, 1:], ignore_index=model.pad_token_id)
-    return loss
+def train_step(model, batch, device, step=None):
+    if isinstance(model, DecoderOnlyTransformer):
+        batch = {k: v.to(device) for k, v in batch.items()}
+        return model.step(batch)
+    
+    elif isinstance(model, Evolver):
+        batch = {'imgs': batch['imgs'].to(device), 'input_ids': batch['input_ids'], 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))}
+        op_loss, tok_loss, idx_loss = model.step(batch)
+        if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)
+        return  op_loss + tok_loss + idx_loss
+        
+    else:
+        raise Exception(f'unsupported model type {type(model)}')
 
 # @timing
 @torch.no_grad()
@@ -558,7 +627,10 @@ def train(config):
     device = config['device']
     csg = CSG()
     
-    dataset = CSGDataset(size=config['image_size'], max_depth=config['max_depth'])
+    if config['model_type'] == 'decoder_only': dataset = CSGDataset(size=config['image_size'], max_depth=config['max_depth'])
+    elif config['model_type'] == 'evolver': dataset = CSGTreeDataset(size=config['image_size'], max_depth=config['max_depth'])
+    else: raise Exception(f"invalid model_type {config['model_type']}")
+    
     train_loader = DataLoader(dataset, batch_size=config['batch_size'], collate_fn=dataset.collate_fn, num_workers=config['num_workers'])
     eval_loader = DataLoader(dataset, batch_size=config['batch_size'], collate_fn=dataset.collate_fn, num_workers=config['num_workers'])
 
@@ -619,7 +691,7 @@ def main():
     config['device'] = args.device
     config['local'] = args.local
     config['from_checkpoint'] = args.from_checkpoint
-    config['name'] = f"csg_decoder_only_{config['d_model']}d_{config['decoder_layers']}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    config['name'] = f"csg_{config['model_type']}_{config['d_model']}d_{config.get('encoder_layers', 0)}enc_{config['decoder_layers']}dec-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if not config['local']: wandb.init(project='csg-evolver', name=config['name'], config=config, resume='allow')
     train(config)
 

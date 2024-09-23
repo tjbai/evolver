@@ -651,7 +651,7 @@ def train(config):
     ):
         if step >= config['train_steps']: break
 
-        loss = train_step(model, batch, device)
+        loss = train_step(model, batch, device, step=step)
         loss.backward()
 
         if (step + 1) % config['grad_accum_steps'] == 0:

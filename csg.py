@@ -211,7 +211,7 @@ class ImageEncoder(nn.Module):
     
 class CSGDataset(Dataset):
 
-    def __init__(self, size=(128, 128), max_depth=4):
+    def __init__(self, size=(128, 128), max_depth=4, **_):
         self.csg = CSG()
         self.size = size
         self.max_depth = max_depth
@@ -480,7 +480,7 @@ def train(config):
     device = config['device']
     csg = CSG()
     
-    dataset = CSGDataset(size=config['image_size'], max_depth=config['max_depth'], num_samples=config['num_samples'])
+    dataset = CSGDataset(size=config['image_size'], max_depth=config['max_depth'])
     train_loader = DataLoader(dataset, batch_size=config['batch_size'], collate_fn=dataset.collate_fn, num_workers=config['num_workers'])
     eval_loader = DataLoader(dataset, batch_size=config['batch_size'], collate_fn=dataset.collate_fn, num_workers=config['num_workers'])
 

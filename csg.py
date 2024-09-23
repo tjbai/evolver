@@ -210,6 +210,7 @@ class ImageEncoder(nn.Module):
         return self.ffn(self.model(img)).view(-1, self.prefix_tokens, self.embed_dim)
     
 class CSGDataset(Dataset):
+
     def __init__(self, size=(128, 128), max_depth=4, num_samples=1000):
         self.csg = CSG()
         self.size = size
@@ -233,6 +234,21 @@ class CSGDataset(Dataset):
         input_ids = torch.full((len(batch), N), self.csg.tok_to_id['PAD'], dtype=torch.long)
         for i, item in enumerate(batch): input_ids[i, :len(item['input_ids'])] = item['input_ids']
         return {'images': images, 'input_ids': input_ids, 'attn_mask': input_ids.eq(self.csg.tok_to_id['PAD'])}
+    
+class CSGTreeDataset(Dataset):
+    
+    def __init__(self, size=(128, 128), max_depth=4, num_samples=1000):
+        self.csg = CSG()
+        self.size = size
+        self.max_depth = max_depth
+        self.num_samples = num_samples
+        self.transform = transforms.Compose([transforms.ToTensor()])
+        
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, _):
+        pass
 
 class SyntaxDecoder(nn.Module):
     pass
@@ -300,15 +316,16 @@ class Evolver(nn.Module):
         tgt = torch.zeros(B, N, self.d_model, device=self.device)
         mem = self.positional_embedding(mem, d=-1)
         
-        permuted_mem = mem[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
-        permuted_input_ids = input_ids[torch.arange(B, device=self.device).unsqueeze(1), idx_ids]
+        batch_indices = torch.arange(B, device=self.device).unsqueeze(1)
+        permuted_mem = mem[batch_indices, idx_ids]
+        permuted_input_ids = input_ids[batch_indices, idx_ids]
             
         tgt[cpy_mask] = permuted_mem[cpy_mask]
         
         if ins_mask.any():
             tgt[ins_mask] = self.token_embedding(tok_ids[ins_mask]) * math.sqrt(self.d_model)
         
-        if torch.any(sub_mask):
+        if sub_mask.any():
             old_embeds = self.token_embedding(permuted_input_ids[sub_mask]) * math.sqrt(self.d_model)
             new_embeds = self.token_embedding(tok_ids[sub_mask]) * math.sqrt(self.d_model)
             tgt[sub_mask] = permuted_mem[sub_mask] - old_embeds + new_embeds
@@ -434,7 +451,7 @@ def load_checkpoint(model, optimizer, config):
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start_step = checkpoint['step'] + 1
-        logger.info(f"Resuming from step {start_step}")
+        logger.info(f'resuming from step {start_step}')
         return start_step
     return 0
 
@@ -442,14 +459,14 @@ def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f"{model.name}_{step}.pt")
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
     
-@timing
+# @timing
 def train_step(model, batch, device):
     batch = {k: v.to(device) for k, v in batch.items()}
     tok_probs = model(batch)
     loss = F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['input_ids'][:, 1:], ignore_index=model.pad_token_id)
     return loss
 
-@timing
+# @timing
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps):
     model.eval()
@@ -473,7 +490,7 @@ def train(config):
 
     start_step = load_checkpoint(model, optim, config)
     
-    logger.info('eval sanity check') 
+    logger.info('eval sanity check')
     evaluate(model, eval_loader, device, 1)
     logger.info('passed!')
 
@@ -504,8 +521,8 @@ def train(config):
             save_checkpoint(model, optim, step, config)
 
     eval_loss = evaluate(model, eval_loader, device, config['num_eval_steps'])
-    log_to_wandb({'eval/loss': eval_loss}, step=config['train_steps'])
-    save_checkpoint(model, optim, config['train_steps'], config)
+    log_to_wandb({'eval/loss': eval_loss}, step=step)
+    save_checkpoint(model, optim, step, config)
 
 def parse_args():
     parser = argparse.ArgumentParser()

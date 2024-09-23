@@ -459,7 +459,7 @@ class Evolver(nn.Module):
         edit_ids = batch['edit_ids']
         T = edit_ids[0].shape[1]
         
-        input_ids = torch.full((B, N), self.pad_token_id)
+        input_ids = torch.full((B, N), self.pad_token_id, device=imgs.device)
         input_ids[:, 0] = self.bos_token_id
         input_ids[:, 1] = self.root_id
         input_ids[:, 2] = self.eos_token_id

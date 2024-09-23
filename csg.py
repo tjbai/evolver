@@ -445,14 +445,15 @@ class Evolver(nn.Module):
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
-        idx_weights = self.pointer(tgt, mem, key_padding_mask=attn_mask)
+        # constrain to all of the token positions
+        idx_weights = self.pointer(tgt, mem[:, 4:], key_padding_mask=attn_mask)
         idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         
         if return_tgt:
-            return (op_probs, tok_probs, idx_probs[:, :, 4:]), tgt
+            return (op_probs, tok_probs, idx_probs), tgt
         
-        return op_probs, tok_probs, idx_probs[:, :, 4:]
+        return op_probs, tok_probs, idx_probs
     
     def step(self, batch):
         imgs = batch['imgs']

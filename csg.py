@@ -332,7 +332,7 @@ class Evolver(nn.Module):
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
         encoder_layers, decoder_layers, vocab_size, max_len,
-        pad_token_id, bos_token_id, eos_token_id, root_id,
+        pad_token_id, bos_token_id, eos_token_id, root_id, name,
         static=False
     ):
         super().__init__()
@@ -348,6 +348,7 @@ class Evolver(nn.Module):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.root_id = root_id
+        self.name = name
         self.static = static
         
         t_params = {
@@ -581,6 +582,7 @@ def init_model(config, csg):
         bos_token_id=csg.tok_to_id['BOS'],
         eos_token_id=csg.tok_to_id['EOS'],
         root_id=csg.tok_to_id['s'],
+        name=config['name'],
         static=config.get('static', False)
     ).to(config['device'])
     

@@ -536,8 +536,8 @@ class DecoderOnlyTransformer(nn.Module):
         causal_mask = T.generate_square_subsequent_mask(N+4, dtype=torch.bool, device=device)
         causal_mask[:, :4] = False
         
-        tok_embedding = self.embed(input_ids)
         img_embedding = self.img_encoder(imgs)
+        tok_embedding = self.embed(input_ids)
         src = torch.cat([img_embedding, tok_embedding], dim=1)
         
         h = self.decoder(src, is_causal=True, src_mask=causal_mask, src_key_padding_mask=pad_mask)
@@ -582,7 +582,7 @@ def init_model(config, csg):
         eos_token_id=csg.tok_to_id['EOS'],
         root_id=csg.tok_to_id['s'],
         static=config.get('static', False)
-    )
+    ).to(config['device'])
     
 def load_checkpoint(model, optimizer, config):
     if config['from_checkpoint']:

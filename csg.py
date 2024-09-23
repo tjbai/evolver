@@ -211,15 +211,14 @@ class ImageEncoder(nn.Module):
     
 class CSGDataset(Dataset):
 
-    def __init__(self, size=(128, 128), max_depth=4, num_samples=1000):
+    def __init__(self, size=(128, 128), max_depth=4):
         self.csg = CSG()
         self.size = size
         self.max_depth = max_depth
-        self.num_samples = num_samples
         self.transform = transforms.Compose([transforms.ToTensor()])
 
     def __len__(self):
-        return self.num_samples
+        return float('inf')
 
     def __getitem__(self, _):
         program = self.csg.generate(max_depth=self.max_depth)
@@ -521,8 +520,8 @@ def train(config):
             save_checkpoint(model, optim, step, config)
 
     eval_loss = evaluate(model, eval_loader, device, config['num_eval_steps'])
-    log_to_wandb({'eval/loss': eval_loss}, step=step)
-    save_checkpoint(model, optim, step, config)
+    log_to_wandb({'eval/loss': eval_loss}, step=config['train_steps'])
+    save_checkpoint(model, optim, config['train_steps'], config)
 
 def parse_args():
     parser = argparse.ArgumentParser()

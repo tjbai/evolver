@@ -153,7 +153,8 @@ class CSG:
         if node['type'] == 'angle': return f"( Angle {node['value']} )"
         
     def render(self, program, size=(128, 128)):
-        return self._render(self.parse(program), size=size)
+        try: return self._render(self.parse(program), size=size)
+        except Exception: return None
     
     def _render(self, tree, size):
         image = Image.new('1', size=size, color='black') 
@@ -181,6 +182,7 @@ class CSG:
         elif node['type'] == 'quad':
             draw = ImageDraw.Draw(image)
             self._draw_quad(draw, node, size)
+
         return image
     
     def _draw_circle(self, draw, node, size):
@@ -206,8 +208,19 @@ class CSG:
         return [self.tok_to_id['BOS']] + list(map(lambda tok: self.tok_to_id[tok], program.split())) + [self.tok_to_id['EOS']]
     
     def detokenize(self, tok_ids, skip_special_tokens=True):
-        if skip_special_tokens: tok_ids = tok_ids[1:-1]
+        if not skip_special_tokens: return ' '.join(self.id_to_tok[id] for id in tok_ids)
+
+        try: start = tok_ids.index(self.tok_to_id['BOS'])
+        except: start = 0
+        
+        try: end = tok_ids.index(self.tok_to_id['EOS'], start+1)
+        except: end = len(tok_ids)
+        
+        tok_ids = tok_ids[start+1:end]
         return ' '.join(self.id_to_tok[id] for id in tok_ids)
+    
+    def detokenize_tensor(self, tok_ids, skip_special_tokens=True):
+        return [self.detokenize(item, skip_special_tokens=skip_special_tokens) for item in tok_ids.tolist()] 
 
 class ImageEncoder(nn.Module):
     
@@ -240,11 +253,15 @@ class CSGDataset(Dataset):
         return {'img': img_tensor, 'input_ids': input_ids, 'program': program}
 
     def collate_fn(self, batch):
-        imgs = torch.stack([item['img'] for item in batch])
         N = max(len(item['input_ids']) for item in batch)
         input_ids = torch.full((len(batch), N), self.csg.tok_to_id['PAD'], dtype=torch.long)
         for i, item in enumerate(batch): input_ids[i, :len(item['input_ids'])] = item['input_ids']
-        return {'imgs': imgs, 'input_ids': input_ids, 'attn_mask': input_ids.eq(self.csg.tok_to_id['PAD'])}
+        return {
+            'input_ids': input_ids,
+            'imgs': torch.stack([item['img'] for item in batch]),
+            'attn_mask': input_ids.eq(self.csg.tok_to_id['PAD']),
+            'programs': [item['program'] for item in batch]
+        }
     
 class CSGTreeDataset(CSGDataset):
     
@@ -536,7 +553,10 @@ class DecoderOnlyTransformer(nn.Module):
         return x
     
     def forward(self, batch):
-        imgs, input_ids, pad_mask = batch.values()
+        imgs = batch['imgs']
+        input_ids = batch['input_ids']
+        pad_mask = batch['attn_mask']
+        
         B, N = input_ids.shape
         device = input_ids.device
 
@@ -562,19 +582,22 @@ class DecoderOnlyTransformer(nn.Module):
         return loss
     
     @torch.no_grad() 
-    def generate(self, img, temperature=1.0):
-        device = img.device
-        input_ids = torch.full((1, 1), self.bos_token_id, dtype=torch.long, device=device)
-        img = img.unsqueeze(0)
+    def generate(self, imgs, temperature=1.0):
+        B = imgs.shape[0]
+        device = imgs.device
+        
+        input_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
         
         for _ in range(self.max_len):
-            logits = self.forward({'imgs': img, 'input_ids': input_ids, 'attn_mask': torch.zeros_like(input_ids, dtype=torch.bool, device=device)})
-            next_tok_logits = logits[0, -1, :] / temperature
+            logits = self.forward({'imgs': imgs, 'input_ids': input_ids, 'attn_mask': torch.zeros_like(input_ids, dtype=torch.bool, device=device)})
+            next_tok_logits = logits[:, -1, :] / temperature
             next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
-            input_ids = torch.cat([input_ids, next_tok.unsqueeze(0)], dim=-1)
-            if next_tok.item() == self.eos_token_id: break
+            input_ids = torch.cat([input_ids, next_tok], dim=-1)
+            finished |= (next_tok.squeeze(-1) == self.eos_token_id)
+            if finished.all(): break
             
-        return input_ids.squeeze(0)
+        return input_ids
     
 def init_model(config, csg):
     if config['model_type'] == 'decoder_only':
@@ -627,7 +650,7 @@ def save_checkpoint(model, optimizer, step, config):
     
 def train_step(model, batch, device, step=None):
     if isinstance(model, DecoderOnlyTransformer):
-        batch = {k: v.to(device) for k, v in batch.items()}
+        batch = {'imgs': batch['imgs'].to(device), 'input_ids': batch['input_ids'].to(device), 'attn_mask': batch['attn_mask'].to(device), 'programs': batch['programs']}
         return model.step(batch)
     
     elif isinstance(model, Evolver):
@@ -639,25 +662,45 @@ def train_step(model, batch, device, step=None):
     else:
         raise Exception(f'unsupported model type {type(model)}')
 
-# @timing
+def calculate_iou(targets, renders):
+    targets = targets.bool()
+    renders = renders.bool()
+    i = torch.logical_and(targets, renders).sum(dim=(1, 2, 3)).float()
+    u = torch.logical_or(targets, renders).sum(dim=(1, 2, 3)).float()
+    return i / u
+
 @torch.no_grad()
-def evaluate(model, eval_loader, device, num_eval_steps):
+def evaluate(model, eval_loader, device, num_eval_steps, csg):
     model.eval()
-    tot = 0
+    tt = transforms.ToTensor()
+    
+    tot_loss = 0
+    tot_samples = 0
+    err_samples = 0
+    tot_iou = 0
+    
     for i, batch in enumerate(eval_loader):
         if i >= num_eval_steps: break
         loss = train_step(model, batch, device)
-        tot += loss.item()
-    return tot / num_eval_steps
-
-# @torch.no_grad()
-# def generate(model, eval_loader, device, num_eval_steps, csg):
-#     model.eval()
-    
-#     for i, batch in enumerate(eval_loader):
-#         if i >= num_eval_steps: break
+        tot_loss += loss.item()
         
-#         for img in batch()
+        generated = model.generate(batch['imgs'])
+        programs = csg.detokenize_tensor(generated)
+        trees = [csg.parse(prog) for prog in programs]
+        err = torch.tensor([tree is None for tree in trees], dtype=torch.bool)
+        tot_samples += len(trees)
+        err_samples += torch.sum(err)
+        
+        targets = batch['imgs'][~err]
+        renders = torch.stack([tt(csg.render(prog)) for i, prog in enumerate(programs) if trees[i] is not None])
+        assert len(targets) == len(renders)
+        tot_iou += torch.sum(calculate_iou(targets, renders))
+        
+    return (
+        tot_loss / num_eval_steps,
+        err_samples / tot_samples,
+        tot_iou / (tot_samples - err_samples) if (err_samples < tot_samples) else 0
+    )
 
 def train(config):
     device = config['device']
@@ -676,7 +719,10 @@ def train(config):
     start_step = load_checkpoint(model, optim, config)
     
     logger.info('eval sanity check')
-    evaluate(model, eval_loader, device, 1)
+    a, b, c = evaluate(model, eval_loader, device, 1, csg)
+    logger.info(a)
+    logger.info(b)
+    logger.info(c)
     logger.info('passed!')
 
     model.train()
@@ -698,8 +744,8 @@ def train(config):
             log_to_wandb({'train/loss': loss.item()}, step=step)
 
         if step % config['eval_every'] == 0:
-            eval_loss = evaluate(model, eval_loader, device, config['num_eval_steps'])
-            log_to_wandb({'eval/loss': eval_loss}, step=step)
+            eval_loss, err_rate, avg_iou = evaluate(model, eval_loader, device, config['num_eval_steps'], csg)
+            log_to_wandb({'eval/loss': eval_loss, 'eval/err_rate': err_rate, 'eval/iou': avg_iou}, step=step)
             model.train()
 
         if step % config['save_every'] == 0:

@@ -566,7 +566,7 @@ class Evolver(nn.Module):
         return traj[-1]
    
     @torch.no_grad() 
-    def generate(self, imgs, max_depth=5, max_steps=100, **_):
+    def generate(self, imgs, max_depth=10, max_steps=150, **_):
         output_ids = [self._generate_unbatched(img, max_depth, max_steps).squeeze() for img in imgs]
         N = max(len(ids) for ids in output_ids)
         res = torch.zeros((imgs.shape[0], N), dtype=torch.long, device=imgs.device)

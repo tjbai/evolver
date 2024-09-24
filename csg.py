@@ -684,7 +684,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, csg):
         loss = train_step(model, batch, device)
         tot_loss += loss.item()
         
-        generated = model.generate(batch['imgs'])
+        generated = model.generate(batch['imgs'].to(device))
         programs = csg.detokenize_tensor(generated)
         trees = [csg.parse(prog) for prog in programs]
         err = torch.tensor([tree is None for tree in trees], dtype=torch.bool)
@@ -692,7 +692,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, csg):
         err_samples += torch.sum(err)
         
         targets = batch['imgs'][~err]
-        renders = torch.stack([tt(csg.render(prog)) for i, prog in enumerate(programs) if trees[i] is not None])
+        renders = torch.stack([tt(csg.render(prog)) for i, prog in enumerate(programs) if trees[i] is not None]).to(device)
         assert len(targets) == len(renders)
         tot_iou += torch.sum(calculate_iou(targets, renders))
         
@@ -719,10 +719,7 @@ def train(config):
     start_step = load_checkpoint(model, optim, config)
     
     logger.info('eval sanity check')
-    a, b, c = evaluate(model, eval_loader, device, 1, csg)
-    logger.info(a)
-    logger.info(b)
-    logger.info(c)
+    evaluate(model, eval_loader, device, 1, csg)
     logger.info('passed!')
 
     model.train()

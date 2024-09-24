@@ -433,14 +433,14 @@ class Evolver(nn.Module):
         device = input_ids.device
         
         attn_mask = input_ids.eq(self.pad_token_id)
-        attn_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), attn_mask], dim=1)
+        concat_attn_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), attn_mask], dim=1)
         
         img_embedding = self.img_encoder(imgs)
         src = torch.cat([img_embedding, self.embed(input_ids) if src is None else src], dim=1)
         
-        mem = self.encoder(src, src_key_padding_mask=attn_mask) if mem is None else mem
+        mem = self.encoder(src, src_key_padding_mask=concat_attn_mask) if mem is None else mem
         tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if self.static else self.compute_tgt(input_ids, edit_ids, mem[:, 4:])
-        h, _ = self.decoder(tgt, mem, memory_key_padding_mask=attn_mask)
+        h, _ = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask)
         
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)

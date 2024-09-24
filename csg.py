@@ -353,7 +353,7 @@ class Evolver(nn.Module):
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
         encoder_layers, decoder_layers, vocab_size, max_len,
-        pad_token_id, bos_token_id, eos_token_id, root_id, name,
+        pad_token_id, bos_token_id, eos_token_id, root_id, csg, name,
         static=False
     ):
         super().__init__()
@@ -369,6 +369,7 @@ class Evolver(nn.Module):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.root_id = root_id
+        self.csg = csg
         self.name = name
         self.static = static
         
@@ -468,7 +469,7 @@ class Evolver(nn.Module):
         
         # constrain to all of the token positions
         # idx_weights = self.pointer(tgt, mem[:, 4:], key_padding_mask=attn_mask)
-        idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))
+        idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))[:, :, 4:]
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         
         if return_tgt:
@@ -509,6 +510,68 @@ class Evolver(nn.Module):
             idx_n += torch.sum(edit_ids[2][:, i, 1:] != -1)
             
         return op_loss / op_n, tok_loss / tok_n, idx_loss / idx_n
+    
+    def _generate(self, input_ids, img, src, max_steps, **_):
+        device = img.device
+        img = img.unsqueeze(0)
+        
+        op_ids = torch.tensor([[0]], dtype=torch.long, device=device)
+        tok_ids = torch.tensor([[self.bos_token_id]], dtype=torch.long, device=device)
+        idx_ids = torch.tensor([[-1]], dtype=torch.long, device=device)
+        
+        for _ in range(max_steps):
+            batch = (img, input_ids, (op_ids, tok_ids, idx_ids))
+            op_probs, tok_probs, idx_probs = self.forward(batch, src=src, return_tgt=False)
+            
+            next_op = op_probs[:, -1]
+            next_tok = tok_probs[:, -1]
+            next_idx = idx_probs[:, -1]
+            
+            op_id = torch.multinomial(next_op.exp(), num_samples=1)
+            if op_id == 0:
+                tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
+                idx_id = torch.tensor([[-1]], device=device)
+            elif op_id == 1:
+                tok_id = torch.tensor([[-1]], device=device)
+                idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+            else:
+                tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
+                idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+                
+            op_ids = torch.cat([op_ids, op_id], dim=1)
+            tok_ids = torch.cat([tok_ids, tok_id], dim=1)
+            idx_ids = torch.cat([idx_ids, idx_id], dim=1)
+            
+            if idx_id.item() >= 0 and input_ids[0, idx_id.item()] == self.eos_token_id: break
+            if tok_id.item() >= 0 and tok_id.item() == self.eos_token_id: break
+            
+        output_ids = self.apply_edits(input_ids, (op_ids, tok_ids, idx_ids))
+        _, tgt = self.forward((img, input_ids, (op_ids, tok_ids, idx_ids)), return_tgt=True)
+        
+        return output_ids, tgt
+    
+    def all_terminal(self, tok_ids):
+        toks = self.csg.detokenize_tensor(tok_ids, skip_special_tokens=True)[0]
+        return all([(tok not in {'s', 'binop', 'op', 'circle', 'quad', 'num', 'angle'}) for tok in toks.split()])
+    
+    def _generate_unbatched(self, img, max_depth, max_steps):
+        src = None
+        traj = [torch.tensor([[self.bos_token_id, self.root_id, self.eos_token_id]], dtype=torch.long, device=img.device)]
+        
+        for _ in range(max_depth):
+            output_ids, src = self._generate(traj[-1], img, src, max_steps=max_steps)
+            traj.append(output_ids)
+            if self.all_terminal(output_ids): break
+            
+        return traj[-1]
+   
+    @torch.no_grad() 
+    def generate(self, imgs, max_depth=5, max_steps=100, **_):
+        output_ids = [self._generate_unbatched(img, max_depth, max_steps).squeeze() for img in imgs]
+        N = max(len(ids) for ids in output_ids)
+        res = torch.zeros((imgs.shape[0], N), dtype=torch.long, device=imgs.device)
+        for i, ids in enumerate(output_ids): res[i, :len(ids)] = ids
+        return res
         
 class DecoderOnlyTransformer(nn.Module):
     
@@ -582,7 +645,7 @@ class DecoderOnlyTransformer(nn.Module):
         return loss
     
     @torch.no_grad() 
-    def generate(self, imgs, temperature=1.0):
+    def generate(self, imgs, temperature=1.0, **_):
         B = imgs.shape[0]
         device = imgs.device
         
@@ -630,6 +693,7 @@ def init_model(config, csg):
         bos_token_id=csg.tok_to_id['BOS'],
         eos_token_id=csg.tok_to_id['EOS'],
         root_id=csg.tok_to_id['s'],
+        csg=csg,
         name=config['name'],
         static=config.get('static', False)
     ).to(config['device'])

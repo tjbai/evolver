@@ -245,7 +245,7 @@ class CSGDataset(Dataset):
 class CSGTreeDataset(CSGDataset):
     
     def to_traj(self, tree):
-        _, CPY, SUB = 0, 1, 2
+        INS, CPY, SUB = 0, 1, 2
         t2i = self.csg.tok_to_id
         
         traj = []
@@ -278,7 +278,7 @@ class CSGTreeDataset(CSGDataset):
                     elif a[j] in {'num', 'angle'}: step = 4
                     
                     for _ in range(step):
-                        cur.append((SUB, t2i[b[k]], j+1))
+                        cur.append((INS, t2i[b[k]], -1))
                         k += 1
             
             cur.append((CPY, -1, len(a)+1))
@@ -440,13 +440,13 @@ class Evolver(nn.Module):
         
         mem = self.encoder(src, src_key_padding_mask=concat_attn_mask) if mem is None else mem
         tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if self.static else self.compute_tgt(input_ids, edit_ids, mem[:, 4:])
-        h, _ = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask)
+        h, (*_, idx_weights) = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask)
         
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
         # constrain to all of the token positions
-        idx_weights = self.pointer(tgt, mem[:, 4:], key_padding_mask=attn_mask)
+        # idx_weights = self.pointer(tgt, mem[:, 4:], key_padding_mask=attn_mask)
         idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         

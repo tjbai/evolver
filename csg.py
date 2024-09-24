@@ -494,11 +494,8 @@ class Evolver(nn.Module):
         idx_loss = idx_n = 0
         
         for i in range(T):
-            (op_probs, tok_probs, idx_probs), src = self.forward(
-                (imgs, input_ids, map(lambda x: x[:, i], edit_ids)),
-                src=src,
-                return_tgt=True
-            )
+            cur_edit_ids = tuple(map(lambda x: x[:, i].to(imgs.device), edit_ids))
+            (op_probs, tok_probs, idx_probs), src = self.forward((imgs, input_ids, cur_edit_ids), src=src, return_tgt=True)
             
             op_loss += F.nll_loss(op_probs[:, :-1].transpose(1, 2), edit_ids[0][:, i, 1:], ignore_index=-1, reduction='sum')
             op_n += torch.sum(edit_ids[0][:, i, 1:] != -1)
@@ -508,6 +505,8 @@ class Evolver(nn.Module):
             
             idx_loss += F.nll_loss(idx_probs[:, :-1].transpose(1, 2), edit_ids[2][:, i, 1:], ignore_index=-1, reduction='sum')
             idx_n += torch.sum(edit_ids[2][:, i, 1:] != -1)
+            
+            input_ids = self.apply_edits(input_ids, cur_edit_ids)
             
         return op_loss / op_n, tok_loss / tok_n, idx_loss / idx_n
     
@@ -566,7 +565,7 @@ class Evolver(nn.Module):
         return traj[-1]
    
     @torch.no_grad() 
-    def generate(self, imgs, max_depth=10, max_steps=150, **_):
+    def generate(self, imgs, max_depth=1, max_steps=1, **_):
         output_ids = [self._generate_unbatched(img, max_depth, max_steps).squeeze() for img in imgs]
         N = max(len(ids) for ids in output_ids)
         res = torch.zeros((imgs.shape[0], N), dtype=torch.long, device=imgs.device)
@@ -718,7 +717,8 @@ def train_step(model, batch, device, step=None):
         return model.step(batch)
     
     elif isinstance(model, Evolver):
-        batch = {'imgs': batch['imgs'].to(device), 'input_ids': batch['input_ids'], 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))}
+        # defer moving edit_ids to gpu to save space
+        batch = {'imgs': batch['imgs'].to(device), 'input_ids': batch['input_ids'], 'edit_ids': batch['edit_ids']}
         op_loss, tok_loss, idx_loss = model.step(batch)
         if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)
         return  op_loss + tok_loss + idx_loss

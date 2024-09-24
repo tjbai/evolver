@@ -10,7 +10,7 @@
     "max_len": 256,
     "image_size": [128, 128],
     "max_depth": 4,
-    "batch_size": 8,
+    "batch_size": 32,
     "num_workers": 4,
     "lr": 3e-4,
     "train_steps": 100000,

@@ -154,7 +154,7 @@ class CSG:
         
     def render(self, program, size=(128, 128)):
         try: return self._render(self.parse(program), size=size)
-        except Exception: return None
+        except: return None
     
     def _render(self, tree, size):
         image = Image.new('1', size=size, color='black') 
@@ -667,7 +667,7 @@ def calculate_iou(targets, renders):
     renders = renders.bool()
     i = torch.logical_and(targets, renders).sum(dim=(1, 2, 3)).float()
     u = torch.logical_or(targets, renders).sum(dim=(1, 2, 3)).float()
-    return i / u
+    return torch.where(u > 0, i / u, torch.ones_like(u))
 
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps, csg):
@@ -686,20 +686,23 @@ def evaluate(model, eval_loader, device, num_eval_steps, csg):
         
         generated = model.generate(batch['imgs'].to(device))
         programs = csg.detokenize_tensor(generated)
-        trees = [csg.parse(prog) for prog in programs]
-        err = torch.tensor([tree is None for tree in trees], dtype=torch.bool)
-        tot_samples += len(trees)
+        renders = [csg.render(prog) for prog in programs]
+        err = torch.tensor([r is None for r in renders], dtype=torch.bool)
+
+        targets = batch['imgs'][~err].to(device)
+        renders = [tt(r) for r in renders if r is not None]
+
+        tot_samples += len(generated)
         err_samples += torch.sum(err)
-        
-        targets = batch['imgs'][~err]
-        renders = torch.stack([tt(csg.render(prog)) for i, prog in enumerate(programs) if trees[i] is not None]).to(device)
-        assert len(targets) == len(renders)
-        tot_iou += torch.sum(calculate_iou(targets, renders))
-        
+
+        if len(renders) > 0:
+            renders = torch.stack(renders).to(device)
+            tot_iou += torch.sum(calculate_iou(targets, renders))
+    
     return (
         tot_loss / num_eval_steps,
         err_samples / tot_samples,
-        tot_iou / (tot_samples - err_samples) if (err_samples < tot_samples) else 0
+        (tot_iou / (tot_samples - err_samples)) if (err_samples < tot_samples) else 0
     )
 
 def train(config):
@@ -748,8 +751,8 @@ def train(config):
         if step % config['save_every'] == 0:
             save_checkpoint(model, optim, step, config)
 
-    eval_loss = evaluate(model, eval_loader, device, config['num_eval_steps'])
-    log_to_wandb({'eval/loss': eval_loss}, step=config['train_steps'])
+    eval_loss, err_rate, avg_iou = evaluate(model, eval_loader, device, config['num_eval_steps'], csg)
+    log_to_wandb({'eval/loss': eval_loss, 'eval/err_rate': err_rate, 'eval/iou': avg_iou}, step=step)
     save_checkpoint(model, optim, config['train_steps'], config)
 
 def parse_args():

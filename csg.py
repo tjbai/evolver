@@ -160,13 +160,16 @@ class CSG:
         return self._draw_tree(image, tree, size)
     
     def _draw_tree(self, image, node, size):
+        if node['type']  == 's':
+            return self._draw_tree(image, node['value'], size)
+        
         if node['type'] == 'binop':
-            if node['op'] == 'Add':
+            if node['op']['value'] == 'Add':
                 left = self._draw_tree(image.copy(), node['left'], size)
                 right = self._draw_tree(image.copy(), node['right'], size)
                 image = ImageChops.add(left, right)
 
-            elif node['op'] == 'Sub':
+            elif node['op']['value'] == 'Sub':
                 left = self._draw_tree(Image.new('1', size, color='black'), node['left'], size)
                 right = self._draw_tree(Image.new('1', size, color='black'), node['right'], size)
                 image = ImageChops.add(image, ImageChops.difference(left, right))
@@ -202,8 +205,9 @@ class CSG:
     def tokenize(self, program):
         return [self.tok_to_id['BOS']] + list(map(lambda tok: self.tok_to_id[tok], program.split())) + [self.tok_to_id['EOS']]
     
-    def detokenize(self, tok_ids):
-        return ' '.join(self.id_to_tok[id] for id in tok_ids) 
+    def detokenize(self, tok_ids, skip_special_tokens=True):
+        if skip_special_tokens: tok_ids = tok_ids[1:-1]
+        return ' '.join(self.id_to_tok[id] for id in tok_ids)
 
 class ImageEncoder(nn.Module):
     
@@ -494,7 +498,8 @@ class DecoderOnlyTransformer(nn.Module):
     def __init__(
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
-        decoder_layers, vocab_size, max_len, pad_token_id, name
+        decoder_layers, vocab_size, max_len,
+        pad_token_id, bos_token_id, eos_token_id, name
     ):
         super().__init__() 
         
@@ -506,6 +511,8 @@ class DecoderOnlyTransformer(nn.Module):
         self.vocab_size = vocab_size
         self.max_len = max_len
         self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
         self.name = name
         
         self.token_embedding = nn.Embedding(vocab_size, d_model)
@@ -546,13 +553,28 @@ class DecoderOnlyTransformer(nn.Module):
         tok_logits = self.tok_head(h)
         tok_probs = F.log_softmax(tok_logits, dim=-1)
         
-        # remove first 4 image tokens 
+        # remove first 4 image tokens
         return tok_probs[:, 4:]
     
     def step(self, batch):
         tok_probs = self.forward(batch)
         loss = F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['input_ids'][:, 1:], ignore_index=self.pad_token_id)
         return loss
+    
+    @torch.no_grad() 
+    def generate(self, img, temperature=1.0):
+        device = img.device
+        input_ids = torch.full((1, 1), self.bos_token_id, dtype=torch.long, device=device)
+        img = img.unsqueeze(0)
+        
+        for _ in range(self.max_len):
+            logits = self.forward({'imgs': img, 'input_ids': input_ids, 'attn_mask': torch.zeros_like(input_ids, dtype=torch.bool, device=device)})
+            next_tok_logits = logits[0, -1, :] / temperature
+            next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
+            input_ids = torch.cat([input_ids, next_tok.unsqueeze(0)], dim=-1)
+            if next_tok.item() == self.eos_token_id: break
+            
+        return input_ids.squeeze(0)
     
 def init_model(config, csg):
     if config['model_type'] == 'decoder_only':
@@ -566,6 +588,8 @@ def init_model(config, csg):
             vocab_size=csg.vocab_size,
             max_len=config['max_len'],
             pad_token_id=csg.tok_to_id['PAD'],
+            bos_token_id=csg.tok_to_id['BOS'],
+            eos_token_id=csg.tok_to_id['EOS'],
             name=config['name']
         ).to(config['device'])
     
@@ -625,6 +649,15 @@ def evaluate(model, eval_loader, device, num_eval_steps):
         loss = train_step(model, batch, device)
         tot += loss.item()
     return tot / num_eval_steps
+
+# @torch.no_grad()
+# def generate(model, eval_loader, device, num_eval_steps, csg):
+#     model.eval()
+    
+#     for i, batch in enumerate(eval_loader):
+#         if i >= num_eval_steps: break
+        
+#         for img in batch()
 
 def train(config):
     device = config['device']

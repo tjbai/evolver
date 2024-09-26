@@ -16,8 +16,8 @@
     "train_steps": 100000,
     "grad_accum_steps": 1,
     "log_every": 100,
-    "eval_every": 1000,
-    "num_eval_steps": 100,
+    "eval_every": 250,
+    "num_eval_steps": 50,
     "save_every": 5000,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints",
     "static": false

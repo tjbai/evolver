@@ -5,8 +5,8 @@
     "nhead": 8,
     "dropout": 0.1,
     "layer_norm_eps": 1e-5,
-    "decoder_layers": 4,
-    "encoder_layers": 4,
+    "decoder_layers": 2,
+    "encoder_layers": 6,
     "max_len": 256,
     "image_size": [128, 128],
     "max_depth": 4,
@@ -20,5 +20,5 @@
     "num_eval_steps": 50,
     "save_every": 5000,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints",
-    "static": true
+    "static": false
 }

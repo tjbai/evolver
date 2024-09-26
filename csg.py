@@ -452,17 +452,19 @@ class Evolver(nn.Module):
     def forward(self, batch, src=None, mem=None, return_tgt=True):
         imgs, input_ids, edit_ids = batch
         B = input_ids.shape[0]
+        N = edit_ids[0].shape[1]
         device = input_ids.device
         
         attn_mask = input_ids.eq(self.pad_token_id)
         concat_attn_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), attn_mask], dim=1)
+        causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
         
         img_embedding = self.img_encoder(imgs)
         src = torch.cat([img_embedding, self.embed(input_ids) if src is None else src], dim=1)
         
         mem = self.encoder(src, src_key_padding_mask=concat_attn_mask) if mem is None else mem
         tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if self.static else self.compute_tgt(input_ids, edit_ids, mem[:, 4:])
-        h, (*_, idx_weights) = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask)
+        h, (*_, idx_weights) = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask, tgt_mask=causal_mask)
         
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
@@ -514,9 +516,9 @@ class Evolver(nn.Module):
         device = img.device
         img = img.unsqueeze(0)
         
-        op_ids = torch.tensor([[0]], dtype=torch.long, device=device)
-        tok_ids = torch.tensor([[self.bos_token_id]], dtype=torch.long, device=device)
-        idx_ids = torch.tensor([[-1]], dtype=torch.long, device=device)
+        op_ids = torch.tensor([[1]], dtype=torch.long, device=device)
+        tok_ids = torch.tensor([[-1]], dtype=torch.long, device=device)
+        idx_ids = torch.tensor([[0]], dtype=torch.long, device=device)
         
         for _ in range(max_steps):
             batch = (img, input_ids, (op_ids, tok_ids, idx_ids))
@@ -527,6 +529,7 @@ class Evolver(nn.Module):
             next_idx = idx_probs[:, -1]
             
             op_id = torch.multinomial(next_op.exp(), num_samples=1)
+            
             if op_id == 0:
                 tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
                 idx_id = torch.tensor([[-1]], device=device)
@@ -571,6 +574,71 @@ class Evolver(nn.Module):
         res = torch.zeros((imgs.shape[0], N), dtype=torch.long, device=imgs.device)
         for i, ids in enumerate(output_ids): res[i, :len(ids)] = ids
         return res
+    
+class AutoregressiveEvolver(nn.Module):
+    
+    def __init__(
+        self,
+        d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
+        encoder_layers, decoder_layers, vocab_size, max_len,
+        pad_token_id, bos_token_id, eos_token_id, root_id, csg, name,
+        static=False
+    ):
+        super().__init__()
+
+        self.d_model = d_model
+        self.dim_feedforward = dim_feedforward
+        self.nhead = nhead
+        self.dropout = dropout
+        self.layer_norm_eps = layer_norm_eps
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.root_id = root_id
+        self.csg = csg
+        self.name = name
+        self.static = static
+        
+        t_params = {
+            'd_model': d_model,
+            'dim_feedforward': dim_feedforward,
+            'nhead': nhead,
+            'dropout': dropout,
+            'layer_norm_eps': layer_norm_eps
+        }
+        
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
+       
+        encoder_layer = TransformerEncoderLayer(**t_params)
+        decoder_layer = TransformerDecoderLayer(**t_params)
+        self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
+        self.decoder = TransformerDecoder(decoder_layer, decoder_layers)
+        self.img_encoder = ImageEncoder(d_model, 4)
+        
+        self.tok_head = nn.Linear(t_params['d_model'], vocab_size)
+        
+    def forward(self, batch):
+        imgs = batch['imgs']
+        input_ids = batch['input_ids']
+        output_ids = batch['output_ids']
+        
+        B, N = input_ids.shape
+        device = input_ids.device
+        
+        pad_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), input_ids.eq(self.pad_token_id, dtype=torch.bool)])
+        causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
+        
+        img_embedding = self.img_encoder(imgs)
+        src = torch.cat([img_embedding, self.embed(input_ids)], dim=1)
+        
+        mem = self.encoder(src, src_key_padding_mask=pad_mask)
+        tgt = self.embed(output_ids)
+        # h, _ = self.decoder(tgt, mem, memory_key_padding_mask=concat_attn_mask)
+        
+        raise NotImplemented()
         
 class DecoderOnlyTransformer(nn.Module):
     
@@ -623,7 +691,6 @@ class DecoderOnlyTransformer(nn.Module):
         device = input_ids.device
 
         pad_mask = torch.cat([torch.full((B, 4), 0, dtype=torch.bool, device=device), pad_mask], dim=1)
-        
         causal_mask = T.generate_square_subsequent_mask(N+4, dtype=torch.bool, device=device)
         causal_mask[:, :4] = False
         

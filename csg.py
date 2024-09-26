@@ -481,6 +481,7 @@ class Evolver(nn.Module):
     
     def step(self, batch):
         imgs = batch['imgs']
+        device = imgs.device
         B, N = batch['input_ids'].shape
         edit_ids = batch['edit_ids']
         T = edit_ids[0].shape[1]
@@ -496,19 +497,23 @@ class Evolver(nn.Module):
         idx_loss = idx_n = 0
         
         for i in range(T):
-            cur_edit_ids = tuple(map(lambda x: x[:, i].to(imgs.device), edit_ids))
-            (op_probs, tok_probs, idx_probs), src = self.forward((imgs, input_ids, cur_edit_ids), src=src, return_tgt=True)
+            op_ids = edit_ids[0][:, i].to(device)
+            tok_ids = edit_ids[1][:, i].to(device)
+            idx_ids = edit_ids[2][:, i].to(device)
+
+            batch = (imgs, input_ids, (op_ids, tok_ids, idx_ids))
+            (op_probs, tok_probs, idx_probs), src = self.forward(batch, src=src, return_tgt=True)
             
-            op_loss += F.nll_loss(op_probs[:, :-1].transpose(1, 2), edit_ids[0][:, i, 1:], ignore_index=-1, reduction='sum')
-            op_n += torch.sum(edit_ids[0][:, i, 1:] != -1)
+            op_loss += F.nll_loss(op_probs[:, :-1].transpose(1, 2), op_ids[:, 1:], ignore_index=-1, reduction='sum')
+            op_n += torch.sum(op_ids[:, 1:] != -1)
             
-            tok_loss += F.nll_loss(tok_probs[:, :-1].transpose(1, 2), edit_ids[1][:, i, 1:], ignore_index=-1, reduction='sum')
-            tok_n += torch.sum(edit_ids[1][:, i, 1:] != -1)
+            tok_loss += F.nll_loss(tok_probs[:, :-1].transpose(1, 2), tok_ids[:, 1:], ignore_index=-1, reduction='sum')
+            tok_n += torch.sum(tok_ids[:, 1:] != -1)
             
-            idx_loss += F.nll_loss(idx_probs[:, :-1].transpose(1, 2), edit_ids[2][:, i, 1:], ignore_index=-1, reduction='sum')
-            idx_n += torch.sum(edit_ids[2][:, i, 1:] != -1)
+            idx_loss += F.nll_loss(idx_probs[:, :-1].transpose(1, 2), idx_ids[:, 1:], ignore_index=-1, reduction='sum')
+            idx_n += torch.sum(idx_ids[:, 1:] != -1)
             
-            input_ids = self.apply_edits(input_ids, cur_edit_ids)
+            input_ids = self.apply_edits(input_ids, (op_ids, tok_ids, idx_ids))
             
         return op_loss / op_n, tok_loss / tok_n, idx_loss / idx_n
     

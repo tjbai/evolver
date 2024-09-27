@@ -534,16 +534,21 @@ class Evolver(nn.Module):
             next_idx = idx_probs[:, -1]
             
             op_id = torch.multinomial(next_op.exp(), num_samples=1)
+            # op_id = torch.argmax(next_op, dim=-1, keepdim=True)
             
             if op_id == 0:
                 tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
+                # tok_id = torch.argmax(next_tok, dim=-1, keepdim=True)
                 idx_id = torch.tensor([[-1]], device=device)
             elif op_id == 1:
                 tok_id = torch.tensor([[-1]], device=device)
                 idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+                # idx_id = torch.argmax(next_idx, dim=-1, keepdim=True)
             else:
                 tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
+                # tok_id = torch.argmax(next_tok, dim=-1, keepdim=True)
                 idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+                # idx_id = torch.argmax(next_idx, dim=-1, keepdim=True)
                 
             op_ids = torch.cat([op_ids, op_id], dim=1)
             tok_ids = torch.cat([tok_ids, tok_id], dim=1)
@@ -565,16 +570,16 @@ class Evolver(nn.Module):
         src = None
         traj = [torch.tensor([[self.bos_token_id, self.root_id, self.eos_token_id]], dtype=torch.long, device=img.device)]
         
-        for _ in range(max_depth):
+        for i in range(max_depth):
             output_ids, src = self._generate(traj[-1], img, src, max_steps=max_steps)
             traj.append(output_ids)
             if self.all_terminal(output_ids): break
             
-        return traj[-1]
+        return traj, traj[-1]
    
     @torch.no_grad() 
-    def generate(self, imgs, max_depth=1, max_steps=1, **_):
-        output_ids = [self._generate_unbatched(img, max_depth, max_steps).squeeze() for img in imgs]
+    def generate(self, imgs, max_depth=10, max_steps=200, **_):
+        output_ids = [self._generate_unbatched(img, max_depth, max_steps)[1].squeeze() for img in imgs]
         N = max(len(ids) for ids in output_ids)
         res = torch.zeros((imgs.shape[0], N), dtype=torch.long, device=imgs.device)
         for i, ids in enumerate(output_ids): res[i, :len(ids)] = ids

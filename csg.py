@@ -299,7 +299,7 @@ class CSGTreeDataset(CSGDataset):
                     elif a[j] in {'num', 'angle'}: step = 4
                     
                     for _ in range(step):
-                        cur.append((INS, t2i[b[k]], -1))
+                        cur.append((SUB, t2i[b[k]], j+1))
                         k += 1
             
             cur.append((CPY, -1, len(a)+1))
@@ -556,6 +556,11 @@ class Evolver(nn.Module):
             
             if idx_id.item() >= 0 and input_ids[0, idx_id.item()] == self.eos_token_id: break
             if tok_id.item() >= 0 and tok_id.item() == self.eos_token_id: break
+            
+        # print('op_ids', op_ids)
+        # print('tok_ids', tok_ids)
+        # print('idx_ids', idx_ids)
+        # print()
             
         output_ids = self.apply_edits(input_ids, (op_ids, tok_ids, idx_ids))
         _, tgt = self.forward((img, input_ids, (op_ids, tok_ids, idx_ids)), return_tgt=True)

@@ -265,6 +265,10 @@ class CSGDataset(Dataset):
     
 class CSGTreeDataset(CSGDataset):
     
+    def __init__(self, *args, use_sub=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_sub = use_sub
+    
     def to_traj(self, tree):
         INS, CPY, SUB = 0, 1, 2
         t2i = self.csg.tok_to_id
@@ -299,7 +303,8 @@ class CSGTreeDataset(CSGDataset):
                     elif a[j] in {'num', 'angle'}: step = 4
                     
                     for _ in range(step):
-                        cur.append((SUB, t2i[b[k]], j+1))
+                        if self.use_sub: cur.append((SUB, t2i[b[k]], j+1))
+                        else: cur.append((INS, t2i[b[k]], -1))
                         k += 1
             
             cur.append((CPY, -1, len(a)+1))
@@ -856,7 +861,7 @@ def train(config):
     csg = CSG()
     
     if config['model_type'] == 'decoder_only': dataset = CSGDataset(size=config['image_size'], max_depth=config['max_depth'])
-    elif config['model_type'] == 'evolver': dataset = CSGTreeDataset(size=config['image_size'], max_depth=config['max_depth'])
+    elif config['model_type'] == 'evolver': dataset = CSGTreeDataset(size=config['image_size'], max_depth=config['max_depth'], use_sub=config.get('use_sub', True))
     else: raise Exception(f"invalid model_type {config['model_type']}")
     
     train_loader = DataLoader(dataset, batch_size=config['batch_size'], collate_fn=dataset.collate_fn, num_workers=config['num_workers'])

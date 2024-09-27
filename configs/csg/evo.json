@@ -20,5 +20,6 @@
     "num_eval_steps": 50,
     "save_every": 5000,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints",
-    "static": false
+    "static": false,
+    "use_sub": true
 }

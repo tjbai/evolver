@@ -58,7 +58,7 @@ class CSG:
         
     def _map(self):
         self.tok_to_id = dict()
-        self.id_to_tok = dict() 
+        self.id_to_tok = dict()
         
         toks = set(self.rules.keys())
         toks.add('BOS')

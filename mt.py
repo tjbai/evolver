@@ -28,7 +28,7 @@ def log_to_wandb(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: logger.info(f'step {step}: {data}')
 
-class Tokenizer:
+class SpacyTokenizer:
     
     def __init__(self):
         self.de_nlp = spacy.load('de_core_news_sm')
@@ -37,16 +37,16 @@ class Tokenizer:
         self.vocab = {}
         with open('vocab/wmt14_de_en.vocab', 'r') as f:
             i = 0
-            for t in enumerate(f, start=2):
+            for t in enumerate(f, start=3):
                 if t not in self.vocab:
                     self.vocab[t] = i
                     i += 1
                 
         self.vocab['BOS'] = 0
         self.vocab['EOS'] = 1
-        self.vocab['PAD'] = -1
+        self.vocab['PAD'] = 2
         self.vocab['UNK'] = len(self.vocab)
-
+        
         self.id_to_tok = {v: k for k, v in self.vocab.items()}
         self.vocab_size = len(self.vocab)
         
@@ -66,12 +66,12 @@ class Tokenizer:
     
 class MTDataset(Dataset):
 
-    def __init__(self, split='train', max_len=256, buffer_size=1000):
+    def __init__(self, split='train', max_len=256, buffer_size=1000, tokenizer=SpacyTokenizer()):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
         
-        # NOTE -- not a great tokenizer, huge vocab, def hurts
-        self.tokenizer = Tokenizer()
+        # NOTE -- not a great tokenizer, huge vocab
+        self.tokenizer = tokenizer
         
         self.buffer = []
         self.buffer_index = 0
@@ -112,39 +112,10 @@ class MTDataset(Dataset):
             padding_value=self.tokenizer.vocab['PAD']
         )
         
-        return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded,}
-        
-    # @staticmethod
-    # def collate_fn(batch):
-    #     src_ids = [item['src_ids'] for item in batch]
-    #     tgt_ids = [item['tgt_ids'] for item in batch]
-        
-    #     # Pad sequences
-    #     src_ids_padded = torch.nn.utils.rnn.pad_sequence(
-    #         [torch.tensor(ids) for ids in src_ids],
-    #         batch_first=True,
-    #         padding_value=Tokenizer.vocab['PAD']
-    #     )
-    #     tgt_ids_padded = torch.nn.utils.rnn.pad_sequence(
-    #         [torch.tensor(ids) for ids in tgt_ids],
-    #         batch_first=True,
-    #         padding_value=Tokenizer.vocab['PAD']
-    #     )
-        
-    #     # Create attention masks
-    #     src_mask = src_ids_padded.ne(Tokenizer.vocab['PAD'])
-    #     tgt_mask = tgt_ids_padded.ne(Tokenizer.vocab['PAD'])
-        
-    #     return {
-    #         'src_ids': src_ids_padded,
-    #         'tgt_ids': tgt_ids_padded,
-    #         'src_mask': src_mask,
-    #         'tgt_mask': tgt_mask,
-    #         'input_ids': tgt_ids_padded[:, :-1],
-    #         'output_ids': tgt_ids_padded[:, 1:]
-    #     }
+        return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded}
 
 class MTEvolver(nn.Module):
+
     def __init__(
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
@@ -202,7 +173,6 @@ class MTEvolver(nn.Module):
         src_ids = batch['src_ids']
         input_ids = batch['input_ids']
         output_ids = batch['output_ids']
-        # edit_ids = batch['edit_ids']
         
         B = input_ids.shape[0]
         N_pref = src_ids.shape[1]
@@ -287,7 +257,7 @@ class MTTransformer(nn.Module):
     def forward(self, batch):
         src_ids = batch['src_ids']
         tgt_ids = batch['tgt_ids']
-       
+        
         N = tgt_ids.shape[1] 
         device = tgt_ids.device
         
@@ -413,10 +383,10 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
 
 def train(config):
     device = torch.device(config['device'])
-    tokenizer = Tokenizer()
+    tokenizer = SpacyTokenizer()
     
-    train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'])
-    eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'])
+    train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
+    eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     logger.info('loaded datasets')
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=train_dataset.collate_fn, num_workers=config['num_workers'])

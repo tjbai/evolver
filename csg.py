@@ -828,26 +828,29 @@ def evaluate(model, eval_loader, device, num_eval_steps, csg):
     tot_samples = 0
     err_samples = 0
     tot_iou = 0
+
+    # TODO -- only generate for a small subset to save time
     
     for i, batch in enumerate(eval_loader):
         if i >= num_eval_steps: break
         loss = train_step(model, batch, device)
         tot_loss += loss.item()
         
-        generated = model.generate(batch['imgs'].to(device))
-        programs = csg.detokenize_tensor(generated)
-        renders = [csg.render(prog) for prog in programs]
-        err = torch.tensor([r is None for r in renders], dtype=torch.bool)
+        if i in {0, 1}:
+            generated = model.generate(batch['imgs'].to(device))
+            programs = csg.detokenize_tensor(generated)
+            renders = [csg.render(prog) for prog in programs]
+            err = torch.tensor([r is None for r in renders], dtype=torch.bool)
 
-        targets = batch['imgs'][~err].to(device)
-        renders = [tt(r) for r in renders if r is not None]
+            targets = batch['imgs'][~err].to(device)
+            renders = [tt(r) for r in renders if r is not None]
 
-        tot_samples += len(generated)
-        err_samples += torch.sum(err)
+            tot_samples += len(generated)
+            err_samples += torch.sum(err)
 
-        if len(renders) > 0:
-            renders = torch.stack(renders).to(device)
-            tot_iou += torch.sum(calculate_iou(targets, renders))
+            if len(renders) > 0:
+                renders = torch.stack(renders).to(device)
+                tot_iou += torch.sum(calculate_iou(targets, renders))
     
     return (
         tot_loss / num_eval_steps,

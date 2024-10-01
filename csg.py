@@ -694,7 +694,7 @@ class DecoderOnlyTransformer(nn.Module):
         )
 
         self.decoder = TransformerEncoder(decoder_layer, decoder_layers)
-        self.img_encoder = ImageEncoder(d_model, 4) # INS, CPY, SUB
+        self.img_encoder = ImageEncoder(d_model, 4)
         self.tok_head = nn.Linear(d_model, vocab_size)
    
     def embed(self, x):
@@ -804,7 +804,6 @@ def train_step(model, batch, device, step=None):
         return model.step(batch)
     
     elif isinstance(model, Evolver):
-        # defer moving edit_ids to gpu to save space
         batch = {'imgs': batch['imgs'].to(device), 'input_ids': batch['input_ids'], 'edit_ids': batch['edit_ids']}
         op_loss, tok_loss, idx_loss = model.step(batch)
         if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)

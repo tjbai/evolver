@@ -36,9 +36,11 @@ class Tokenizer:
         
         self.vocab = {}
         with open('vocab/wmt14_de_en.vocab', 'r') as f:
-            for i, _t in enumerate(f, start=2):
-                t = _t.strip()
-                self.vocab[t] = i
+            i = 0
+            for t in enumerate(f, start=2):
+                if t not in self.vocab:
+                    self.vocab[t] = i
+                    i += 1
                 
         self.vocab['BOS'] = 0
         self.vocab['EOS'] = 1
@@ -67,6 +69,8 @@ class MTDataset(Dataset):
     def __init__(self, split='train', max_len=256, buffer_size=1000):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
+        
+        # NOTE -- not a great tokenizer, huge vocab, def hurts
         self.tokenizer = Tokenizer()
         
         self.buffer = []
@@ -413,7 +417,7 @@ def train(config):
     
     train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'])
     eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'])
-    print('loaded datasets')
+    logger.info('loaded datasets')
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=train_dataset.collate_fn, num_workers=config['num_workers'])
     eval_loader = DataLoader(eval_dataset, batch_size=config['batch_size'], collate_fn=eval_dataset.collate_fn, num_workers=config['num_workers'])

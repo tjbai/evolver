@@ -1,0 +1,22 @@
+{
+    "model_type": "decoder_only",
+    "d_model": 512,
+    "dim_feedforward": 2048,
+    "nhead": 8,
+    "dropout": 0.1,
+    "layer_norm_eps": 1e-5,
+    "encoder_layers": 6,
+    "decoder_layers": 6,
+    "max_len": 256,
+    "buffer_size": 1000,
+    "batch_size": 32,
+    "num_workers": 4,
+    "lr": 3e-4,
+    "train_steps": 100000,
+    "grad_accum_steps": 1,
+    "log_every": 10,
+    "eval_every": 1000,
+    "num_eval_steps": 100,
+    "save_every": 5000,
+    "checkpoint_dir": "/scratch4/jeisner1/checkpoints"
+}

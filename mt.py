@@ -34,29 +34,28 @@ class SpacyTokenizer:
         self.de_nlp = spacy.load('de_core_news_sm')
         self.en_nlp = spacy.load('en_core_web_sm')
         
-        self.vocab = {}
+        self.vocab = {'BOS': 0, 'EOS': 1, 'PAD': 2, 'UNK': 3}
         with open('vocab/wmt14_de_en.vocab', 'r') as f:
-            i = 0
-            for t in enumerate(f, start=3):
+            i = 4
+            for _t in f:
+                t = _t[:-1]
                 if t not in self.vocab:
                     self.vocab[t] = i
                     i += 1
                 
-        self.vocab['BOS'] = 0
-        self.vocab['EOS'] = 1
-        self.vocab['PAD'] = 2
-        self.vocab['UNK'] = len(self.vocab)
-        
         self.id_to_tok = {v: k for k, v in self.vocab.items()}
         self.vocab_size = len(self.vocab)
         
-    def encode(self, text, lang, skip_special_tokens=False):
+    def get_id(self, t):
+        return self.vocab.get(t, self.vocab['UNK'])
+        
+    def encode(self, text, lang, add_special_tokens=True):
         doc = {'de': self.de_nlp, 'en': self.en_nlp}[lang](text)
-        tokens = [self.vocab.get(token.text, self.vocab['UNK']) for token in doc]
-        if not skip_special_tokens: tokens = [self.vocab['BOS']] + tokens + [self.vocab['EOS']]
+        tokens = [self.get_id(token.text) for token in doc]
+        if add_special_tokens: tokens = [self.vocab['BOS']] + tokens + [self.vocab['EOS']]
         return tokens
     
-    def decode(self, tok_ids, skip_special_tokens=False):
+    def decode(self, tok_ids, skip_special_tokens=True):
         tokens = []
         for id in tok_ids:
             token = self.id_to_tok.get(id, 'UNK')
@@ -113,6 +112,71 @@ class MTDataset(Dataset):
         )
         
         return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded}
+    
+class MTEditDataset(MTDataset):
+    
+    def depth(self, doc):
+        root = [tok for tok in doc if tok.head == tok] [0]
+        def dfs(node):
+            r = 1
+            for child in node.children: r = max(r, 1 + dfs(child))
+            return r
+        return dfs(root)
+    
+    def gen(self, doc):
+        INS, CPY, SUB = 0, 1, 2 
+        traj = [['_' for _ in range(len(doc))] for _ in range(2*self.depth(doc))]
+        
+        def traverse(token, depth):
+            for i in range(depth, len(traj)):
+                traj[i][token.i] = (token.text if (i > depth+1) else token.pos_, token.i, token.head.i)
+
+            traj[depth+1][token.i] = (token.text, token.i, token.head.i)
+            for child in token.children: traverse(child, depth+2)
+        
+        root = next(token for token in doc if token.head == token)
+        traverse(root, 0)
+        
+        m = {}
+        res = [[0, root.pos_, 1]]
+        edit_traj = [[(INS, 'BOS', -1), (INS, self.tokenizer.get_id(root.pos_), -1), (INS, 'EOS', -1)]]
+        
+        for i, seq in enumerate(traj[1:]):
+            cur_edits = [(CPY, -1, 0)]
+            
+            if i % 2 == 0:
+                k = 1
+                for t in seq:
+                    if t == '_': continue
+                    if t[1] in m: cur_edits.append((CPY, -1, k))
+                    else: cur_edits.append((SUB, self.tokenizer.get_id(t[0]), k))
+                    m[t[1]] = k
+                    k += 1
+                    
+            else:
+                k = 1
+                for t in seq:
+                    if t == '_': continue
+                    if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
+                    
+                    # NOTE -- let's call this INS for now...
+                    else: cur_edits.append((INS, self.tokenizer.get_id(t[0]), m[t[2]]))
+            
+            res.append([0] + [self.tokenizer.get_id(t[0]) for t in seq if t != '_'] + [1])
+            cur_edits.append((CPY, -1, len(edit_traj[-1])+1))
+            edit_traj.append(cur_edits)
+        
+        return res, edit_traj
+    
+    def __getitem__(self, _):
+        if self.buffer_index >= len(self.buffer): self.refill_buffer()
+        item = self.buffer[self.buffer_index]
+        self.buffer_index += 1
+        
+        src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
+        res, edit_traj = self.gen(self.tokenizer.en_nlp(item['en']))
+        
+        return src_ids, res, edit_traj
 
 class MTEvolver(nn.Module):
 

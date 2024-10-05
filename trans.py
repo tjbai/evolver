@@ -162,10 +162,14 @@ class TransformerDecoder(nn.Module):
     
 class CausalTransformerDecoderLayer(TransformerDecoderLayer):
     
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.parallel = True
+        
     def forward(self, tgt, mem, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None):
         causal_mask = T.generate_square_subsequent_mask(tgt.size(1), tgt.device, dtype=torch.bool)
         
-        if self.training:
+        if self.parallel:
             return super().forward(
                 tgt, mem,
                 tgt_mask=causal_mask,
@@ -192,6 +196,20 @@ class CausalTransformerDecoderLayer(TransformerDecoderLayer):
         return self.dropout_1(self.self_attn(x, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0])
     
 class CausalTransformerDecoder(TransformerDecoder):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.parallel = True
+
+    def set_parallel(self):
+        self.parallel = True
+        for layer in self.layers:
+            layer.parallel = True
+
+    def set_causal(self):
+        self.parallel = False
+        for layer in self.layers:
+            layer.parallel = False
     
     def forward(self, tgt, mem, cache=None, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None):
         masks = {
@@ -202,7 +220,7 @@ class CausalTransformerDecoder(TransformerDecoder):
         
         x = tgt
         
-        if self.training:
+        if self.parallel:
             attn_weights = []
             for mod in self.layers:
                 x, layer_attn_weights = mod(x, mem, **masks)

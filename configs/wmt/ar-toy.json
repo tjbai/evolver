@@ -9,7 +9,7 @@
     "encoder_layers": 4,
     "max_len": 32,
     "buffer_size": 1000,
-    "batch_size": 1,
+    "batch_size": 2,
     "num_workers": 4,
     "lr": 3e-4,
     "train_steps": 100000,

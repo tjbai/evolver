@@ -17,9 +17,16 @@ from torch.optim import AdamW
 from sacrebleu import corpus_bleu
 from tqdm import tqdm
 from datasets import load_dataset
+from transformers import BertTokenizer as TransformersBertTokenizer
 
 from embed import SinusoidalEmbedding
-from trans import TransformerEncoderLayer, TransformerEncoder, TransformerDecoderLayer, TransformerDecoder, MultiheadPointer
+from trans import (
+    TransformerEncoderLayer,
+    TransformerEncoder,
+    CausalTransformerDecoderLayer,
+    CausalTransformerDecoder,
+    MultiheadPointer
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -62,16 +69,32 @@ class SpacyTokenizer:
             if skip_special_tokens and token in {'PAD', 'BOS', 'EOS'}: continue
             tokens.append(token)
         return ' '.join(tokens)
+
+class BertTokenizer:
+    
+    def __init__(self):
+        self.tokenizer = TransformersBertTokenizer.from_pretrained('bert-base-multilingual-uncased')
+        self.vocab_size = self.tokenizer.vocab_size
+        self.pad_token_id = 0
+        self.unk_token_id = 100
+        self.bos_token_id = 101
+        self.eos_token_id = 102
+
+    def get_id(self, t):
+        return self.tokenizer.get_vocab().get(t, self.unk_token_id)
+
+    def encode(self, text, **_):
+        return self.tokenizer(text)['input_ids']
+
+    def decode(self, tok_ids, skip_special_tokens=True, **_):
+        return self.tokenizer.decode(tok_ids, skip_special_tokens=skip_special_tokens)
     
 class MTDataset(Dataset):
 
     def __init__(self, split='train', max_len=256, buffer_size=1000, tokenizer=SpacyTokenizer()):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
-        
-        # NOTE -- not a great tokenizer, huge vocab
         self.tokenizer = tokenizer
-        
         self.buffer = []
         self.buffer_index = 0
         self.buffer_size = buffer_size
@@ -83,10 +106,10 @@ class MTDataset(Dataset):
         if self.buffer_index >= len(self.buffer): self.refill_buffer()
         item = self.buffer[self.buffer_index]
         self.buffer_index += 1
-        
+
         src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
         tgt_ids = self.tokenizer.encode(item['en'], lang='en')[:self.max_len]
-        
+
         return {'src_ids': src_ids, 'tgt_ids': tgt_ids} 
     
     def refill_buffer(self):
@@ -102,13 +125,13 @@ class MTDataset(Dataset):
         src_ids_padded = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(ids) for ids in src_ids],
             batch_first=True,
-            padding_value=self.tokenizer.vocab['PAD']
+            padding_value=self.tokenizer.pad_token_id
         )
         
         tgt_ids_padded = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(ids) for ids in tgt_ids],
             batch_first=True,
-            padding_value=self.tokenizer.vocab['PAD']
+            padding_value=self.tokenizer.pad_token_id
         )
         
         return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded}
@@ -124,7 +147,9 @@ class MTEditDataset(MTDataset):
         return dfs(root)
     
     def gen(self, doc):
+        get_id = self.tokenizer.get_id
         INS, CPY, SUB = 0, 1, 2 
+       
         traj = [['_' for _ in range(len(doc))] for _ in range(2*self.depth(doc))]
         
         def traverse(token, depth):
@@ -138,9 +163,13 @@ class MTEditDataset(MTDataset):
         traverse(root, 0)
         
         m = {}
-        res = [[0, root.pos_, 1]]
-        edit_traj = [[(INS, 'BOS', -1), (INS, self.tokenizer.get_id(root.pos_), -1), (INS, 'EOS', -1)]]
+        input_ids = [[0, get_id(root.pos_), 1]]
         
+        op_ids = []
+        tok_ids = []
+        idx_ids = []
+        
+        last_len = 3
         for i, seq in enumerate(traj[1:]):
             cur_edits = [(CPY, -1, 0)]
             
@@ -149,7 +178,7 @@ class MTEditDataset(MTDataset):
                 for t in seq:
                     if t == '_': continue
                     if t[1] in m: cur_edits.append((CPY, -1, k))
-                    else: cur_edits.append((SUB, self.tokenizer.get_id(t[0]), k))
+                    else: cur_edits.append((SUB, get_id(t[0]), k))
                     m[t[1]] = k
                     k += 1
                     
@@ -158,15 +187,19 @@ class MTEditDataset(MTDataset):
                 for t in seq:
                     if t == '_': continue
                     if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
-                    
                     # NOTE -- let's call this INS for now...
-                    else: cur_edits.append((INS, self.tokenizer.get_id(t[0]), m[t[2]]))
+                    else: cur_edits.append((INS, get_id(t[0]), m[t[2]]))
             
-            res.append([0] + [self.tokenizer.get_id(t[0]) for t in seq if t != '_'] + [1])
-            cur_edits.append((CPY, -1, len(edit_traj[-1])+1))
-            edit_traj.append(cur_edits)
+            input_ids.append([get_id('BOS')] + [get_id(t[0]) for t in seq if t != '_'] + [get_id('EOS')])
+            cur_edits.append((CPY, -1, last_len - 1))
+            last_len = len(cur_edits)
+            
+            ops, toks, idxs = zip(*cur_edits)
+            op_ids.append(ops)
+            tok_ids.append(toks)
+            idx_ids.append(idxs)
         
-        return res, edit_traj
+        return input_ids, (op_ids, tok_ids, idx_ids)
     
     def __getitem__(self, _):
         if self.buffer_index >= len(self.buffer): self.refill_buffer()
@@ -174,9 +207,13 @@ class MTEditDataset(MTDataset):
         self.buffer_index += 1
         
         src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
-        res, edit_traj = self.gen(self.tokenizer.en_nlp(item['en']))
+        input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
-        return src_ids, res, edit_traj
+        t = random.randint(0, len(input_ids))
+        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+    
+    def collate_fn(self, batch):
+        pass
 
 class MTEvolver(nn.Module):
 
@@ -307,9 +344,9 @@ class MTTransformer(nn.Module):
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
        
         encoder_layer = TransformerEncoderLayer(**t_params)
-        decoder_layer = TransformerDecoderLayer(**t_params)
+        decoder_layer = CausalTransformerDecoderLayer(**t_params)
         self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
-        self.decoder = TransformerDecoder(decoder_layer, decoder_layers)
+        self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
         
         self.tok_head = nn.Linear(d_model, vocab_size)
         
@@ -318,45 +355,44 @@ class MTTransformer(nn.Module):
         x = self.positional_embedding(x, d=1)
         return x
     
-    def forward(self, batch):
+    def forward(self, batch, cache=None):
         src_ids = batch['src_ids']
         tgt_ids = batch['tgt_ids']
-        
-        N = tgt_ids.shape[1] 
-        device = tgt_ids.device
         
         src = self.embed(src_ids)
         tgt = self.embed(tgt_ids)
         
         pad_mask = src_ids.eq(self.pad_token_id)
-        causal_mask = T.generate_square_subsequent_mask(N, dtype=torch.bool, device=device)
-        
         mem = self.encoder(src, src_key_padding_mask=pad_mask)
-        h, _ = self.decoder(tgt, mem, tgt_is_causal=True, tgt_mask=causal_mask, memory_key_padding_mask=pad_mask)
+        h, _, cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
-        return tok_probs
+        return tok_probs, cache
        
     def step(self, batch, reduce=True):
-        tok_probs = self.forward(batch)
+        tok_probs, _ = self.forward(batch)
         return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
     
     @torch.no_grad() 
     def generate(self, src_ids, temperature=1.0, **_):
         B = src_ids.shape[0]
         device = src_ids.device
+        self.decoder.set_causal()
         
         tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         
+       
+        cache = None
         for _ in range(self.max_len):
-            logits = self.forward({'src_ids': src_ids, 'tgt_ids': tgt_ids})
+            logits, cache = self.forward({'src_ids': src_ids, 'tgt_ids': tgt_ids}, cache=cache)
             next_tok_logits = logits[:, -1, :] / temperature
             next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
             tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
             finished |= (next_tok.squeeze(-1) == self.eos_token_id)
             if finished.all(): break
-            
+        
+        self.decoder.set_parallel()
         return tgt_ids
     
 def init_model(config, tokenizer):
@@ -371,9 +407,9 @@ def init_model(config, tokenizer):
             encoder_layers=config['encoder_layers'],
             vocab_size=tokenizer.vocab_size,
             max_len=config['max_len'],
-            pad_token_id=tokenizer.vocab['PAD'],
-            bos_token_id=tokenizer.vocab['BOS'],
-            eos_token_id=tokenizer.vocab['EOS'],
+            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             name=config['name']
         ).to(config['device'])
         
@@ -447,7 +483,10 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
 
 def train(config):
     device = torch.device(config['device'])
-    tokenizer = SpacyTokenizer()
+    
+    # NOTE
+    # tokenizer = SpacyTokenizer()
+    tokenizer = BertTokenizer()
     
     train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)

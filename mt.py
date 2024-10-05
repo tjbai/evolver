@@ -53,21 +53,26 @@ class SpacyTokenizer:
         self.id_to_tok = {v: k for k, v in self.vocab.items()}
         self.vocab_size = len(self.vocab)
         
+        self.bos_token_id = 0
+        self.eos_token_id = 1
+        self.pad_token_id = 2
+        self.unk_token_id = 3
+        
     def get_id(self, t):
-        return self.vocab.get(t, self.vocab['UNK'])
+        return self.vocab.get(t, self.unk_token_id)
         
     def encode(self, text, lang, add_special_tokens=True):
         doc = {'de': self.de_nlp, 'en': self.en_nlp}[lang](text)
         tokens = [self.get_id(token.text) for token in doc]
-        if add_special_tokens: tokens = [self.vocab['BOS']] + tokens + [self.vocab['EOS']]
+        if add_special_tokens: tokens = [self.bos_token_id] + tokens + [self.eos_token_id]
         return tokens
     
     def decode(self, tok_ids, skip_special_tokens=True):
         tokens = []
-        for id in tok_ids:
+        for id in tok_ids.tolist():
             token = self.id_to_tok.get(id, 'UNK')
-            if skip_special_tokens and token in {'PAD', 'BOS', 'EOS'}: continue
-            tokens.append(token)
+            if not skip_special_tokens or (token not in {'PAD', 'BOS', 'EOS'}): tokens.append(token)
+            if token == 'EOS': break
         return ' '.join(tokens)
 
 class BertTokenizer:
@@ -209,11 +214,47 @@ class MTEditDataset(MTDataset):
         src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
         input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
-        t = random.randint(0, len(input_ids))
-        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+        t = random.randint(0, len(input_ids)-2)
+        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'output_ids': input_ids[t+1], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
     
     def collate_fn(self, batch):
-        pass
+        src_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['src_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id
+        )
+        
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['input_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id
+        )
+        
+        output_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['output_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id
+        )
+
+        op_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['edit_ids'][0]) for item in batch],
+            batch_first=True,
+            padding_value=-1
+        )
+       
+        tok_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['edit_ids'][1]) for item in batch],
+            batch_first=True,
+            padding_value=-1
+        )
+        
+        idx_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['edit_ids'][2]) for item in batch],
+            batch_first=True,
+            padding_value=-1
+        )
+        
+        return {'src_ids': src_ids, 'input_ids': input_ids, 'output_ids': output_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
 class MTEvolver(nn.Module):
 
@@ -221,7 +262,7 @@ class MTEvolver(nn.Module):
         self,
         d_model, dim_feedforward, nhead, dropout, layer_norm_eps,
         encoder_layers, decoder_layers,
-        vocab_size, max_len, bos_token_id, eos_token_id, name
+        vocab_size, max_len, bos_token_id, eos_token_id, pad_token_id, name
     ):
         super().__init__()
 
@@ -249,9 +290,9 @@ class MTEvolver(nn.Module):
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
        
         encoder_layer = TransformerEncoderLayer(**t_params)
-        decoder_layer = TransformerDecoderLayer(**t_params)
+        decoder_layer = CausalTransformerDecoderLayer(**t_params)
         self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
-        self.decoder = TransformerDecoder(decoder_layer, decoder_layers)
+        self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
         
         self.op_head = nn.Linear(t_params['d_model'], 3)
         self.tok_head = nn.Linear(t_params['d_model'], vocab_size)
@@ -265,33 +306,26 @@ class MTEvolver(nn.Module):
             add_zero_attn=False
         )
         
-    def embed(self, x, embedding):
-        x = embedding(x) * math.sqrt(self.d_model)
+    def embed(self, x):
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
         x = self.positional_embedding(x, d=1)
         return x
     
-    def forward(self, batch, src=None):
+    def forward(self, batch, cache=None):
         src_ids = batch['src_ids']
         input_ids = batch['input_ids']
         output_ids = batch['output_ids']
         
-        B = input_ids.shape[0]
         N_pref = src_ids.shape[1]
-        N_out = output_ids.shape[1]
-        device = src_ids.device
         
         src_embed = self.embed(src_ids)
         input_embed = self.embed(input_ids)
-        src = torch.cat([src_embed, input_embed if src is None else src], dim=1)
-        
-        pad_mask = torch.cat([src_ids, input_ids], dim=1).eq(self.pad_token_id)
-        causal_mask = T.generate_square_subsequent_mask(N_out, dtype=torch.bool, device=device)
-        
-        mem = self.encoder(src, src_key_padding_mask=pad_mask) if mem is None else mem
         tgt = self.embed(output_ids)
-        h, (*_, idx_weights) = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, tgt_mask=causal_mask)
-        # tgt = self.embed(self.apply_edits(input_ids, edit_ids)) if self.static \
-        #         else self.compute_tgt(input_ids, edit_ids, mem[:, src_ids.shape[1]:])
+
+        src = torch.cat([src_embed, input_embed], dim=1)
+        pad_mask = torch.cat([src_ids, input_ids], dim=1).eq(self.pad_token_id)
+        mem = self.encoder(src, src_key_padding_mask=pad_mask)
+        h, (*_, idx_weights), cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
         
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
@@ -299,16 +333,76 @@ class MTEvolver(nn.Module):
         idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))[:, :, N_pref:]
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         
-        return op_probs, tok_probs, idx_probs
+        return (op_probs, tok_probs, idx_probs), cache
     
     def compute_tgt(self, tgt_ids, edit_ids, mem):
         pass
     
     def step(self, batch):
-        pass
+        (op_probs, tok_probs, idx_probs), _ = self.forward(batch)
+        return (
+            F.nll_loss(op_probs[:, :-1].transpose(1, 2), batch['edit_ids'][0][:, 1:], ignore_index=-1, reduction='mean'),
+            F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['edit_ids'][1][:, 1:], ignore_index=-1, reduction='mean'),
+            F.nll_loss(idx_probs[:, :-1].transpose(1, 2), batch['edit_ids'][2][:, 1:], ignore_index=-1, reduction='mean')
+        )
+        
+    def apply_edits(self, input_ids, edit_ids):
+        op_ids, tok_ids, idx_ids = edit_ids
+        B = input_ids.shape[0]
+        res = torch.zeros(B, op_ids.shape[1], dtype=torch.long, device=input_ids.device)
+
+        ins_mask = op_ids.eq(0) | op_ids.eq(2)
+        res[ins_mask] = tok_ids[ins_mask]
+        
+        cpy_mask = op_ids.eq(1)
+        permuted_inputs = input_ids[torch.arange(B).view(-1, 1), idx_ids]
+        
+        res[cpy_mask] = permuted_inputs[cpy_mask]
+        
+        return res
     
-    def generate(self, src_ids, max_depth=10, max_steps=200):
-        pass
+    def _generate(self, batch, max_steps):
+        B = batch['src_ids'].shape[0]
+        device = batch['src_ids'].device
+        
+        op_ids = torch.full((B, 1), 1, dtype=torch.long, device=device)
+        tok_ids = torch.full((B, 1), -1, dtype=torch.long, device=device)
+        idx_ids = torch.full((B, 1), 0, dtype=torch.long, device=device)
+        
+        alive = torch.ones(B, dtype=torch.bool)
+       
+        cache = None 
+        for _ in range(max_steps):
+            if not alive.any(): break
+            
+            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids'], 'output_ids': batch['output_ids'], 'edit_ids': (op_ids, tok_ids, idx_ids)}
+            probs, cache = self.forward(batch, cache=cache)
+            next_op, next_tok, next_idx = tuple(map(lambda x: x[:, -1], probs))
+            
+            op_id = torch.multinomial(next_op.exp(), num_samples=1)
+            tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
+            idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+            
+            idx_id[op_id.eq(0)] = -1
+            tok_id[op_id.eq(1)] = -1
+
+            op_ids = torch.cat([op_ids, op_id], dim=1)
+            tok_ids = torch.cat([tok_ids, tok_id], dim=1)
+            idx_ids = torch.cat([idx_ids, idx_id], dim=1)
+
+            output_ids = self.apply_edits(batch['input_ids'], (op_ids, tok_ids, idx_ids))
+            alive[output_ids[:, -1] == self.eos_token_id] = False
+            
+        return output_ids
+    
+    def generate(self, batch, max_depth=10, max_steps=128):
+        self.decoder.set_causal()
+        traj = [batch['input_ids']]
+        for _ in range(max_depth):
+            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1], 'output_ids': batch['output_ids'], 'edit_ids': batch['edit_ids']}
+            traj.append(self._generate(batch, max_steps))
+        self.decoder.set_parallel()
+        return traj[-1]
     
 class MTTransformer(nn.Module):
     
@@ -373,7 +467,7 @@ class MTTransformer(nn.Module):
         tok_probs, _ = self.forward(batch)
         return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
     
-    @torch.no_grad() 
+    @torch.no_grad()
     def generate(self, src_ids, temperature=1.0, **_):
         B = src_ids.shape[0]
         device = src_ids.device
@@ -382,7 +476,6 @@ class MTTransformer(nn.Module):
         tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         
-       
         cache = None
         for _ in range(self.max_len):
             logits, cache = self.forward({'src_ids': src_ids, 'tgt_ids': tgt_ids}, cache=cache)
@@ -413,9 +506,7 @@ def init_model(config, tokenizer):
             name=config['name']
         ).to(config['device'])
         
-    raise NotImplementedError()
-    
-    return Evolver(
+    return MTEvolver(
         d_model=config['d_model'],
         dim_feedforward=config['dim_feedforward'],
         nhead=config['nhead'],
@@ -423,18 +514,14 @@ def init_model(config, tokenizer):
         layer_norm_eps=config['layer_norm_eps'],
         decoder_layers=config['decoder_layers'],
         encoder_layers=config['encoder_layers'],
-        vocab_size=csg.vocab_size,
+        vocab_size=tokenizer.vocab_size,
         max_len=config['max_len'],
-        pad_token_id=csg.tok_to_id['PAD'],
-        bos_token_id=csg.tok_to_id['BOS'],
-        eos_token_id=csg.tok_to_id['EOS'],
-        root_id=csg.tok_to_id['s'],
-        csg=csg,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
         name=config['name'],
-        static=config.get('static', False)
     ).to(config['device'])
     
- 
 def load_checkpoint(model, optimizer, config):
     if config['from_checkpoint']:
         checkpoint = torch.load(config['from_checkpoint'])
@@ -449,10 +536,13 @@ def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
     
-def train_step(model, batch, device):
+def train_step(model, batch, device, step=None, reduce=True):
     if isinstance(model, MTTransformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
-    raise NotImplementedError()
+    else:
+        op_loss, tok_loss, idx_loss = model.step({'src_ids': batch['src_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+        if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)
+        return op_loss + tok_loss + idx_loss
 
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
@@ -465,13 +555,15 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
     for i, batch in enumerate(tqdm(eval_loader, desc="eval...", total=num_eval_steps)):
         if i >= num_eval_steps: break
         
-        batch = {k: v.to(device) for k, v in batch.items()}
         if isinstance(model, MTTransformer):
-            loss = model.step(batch)
+            loss = train_step(model, batch, device)
             tot_loss += loss.item()
             generated_ids = model.generate(batch['src_ids'])
             
-        else: raise NotImplementedError()
+        else:
+            loss = train_step(model, batch, device)
+            tot_loss += loss.item()
+            generated_ids = model.generate(batch)
         
         for hyp, ref in zip(generated_ids, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)
@@ -484,10 +576,8 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
 def train(config):
     device = torch.device(config['device'])
     
-    # NOTE
-    # tokenizer = SpacyTokenizer()
-    tokenizer = BertTokenizer()
-    
+    tokenizer = BertTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
+   
     train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     logger.info('loaded datasets')
@@ -499,10 +589,6 @@ def train(config):
     optim = AdamW(model.parameters(), lr=config['lr'])
     start_step = load_checkpoint(model, optim, config)
     
-    logger.info('eval sanity check')
-    evaluate(model, eval_loader, device, 1, tokenizer)
-    logger.info('passed!')
-    
     model.train()
     for step, batch in tqdm(
         enumerate(train_loader, start=start_step),
@@ -511,7 +597,7 @@ def train(config):
     ):
         if step >= config['train_steps']: break
         
-        loss = train_step(model, batch, device)
+        loss = train_step(model, batch, device, step=step)
         loss.backward()
 
         if (step + 1) % config['grad_accum_steps'] == 0:

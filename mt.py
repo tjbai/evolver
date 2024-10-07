@@ -478,7 +478,7 @@ class MTTransformer(nn.Module):
         
         cache = None
         for _ in range(self.max_len):
-            logits, cache = self.forward({'src_ids': src_ids, 'tgt_ids': tgt_ids}, cache=cache)
+            logits, cache = self.forward({'src_ids': src_ids.to(device), 'tgt_ids': tgt_ids.to(device)}, cache=cache)
             next_tok_logits = logits[:, -1, :] / temperature
             next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
             tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
@@ -563,7 +563,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate(batch)
+            generated_ids = model.generate({'src_ids': batch['src_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         
         for hyp, ref in zip(generated_ids, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)
@@ -577,9 +577,10 @@ def train(config):
     device = torch.device(config['device'])
     
     tokenizer = BertTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
-   
-    train_dataset = MTDataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
-    eval_dataset = MTDataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
+
+    dataset = MTDataset if config['model_type'] == 'decoder_only' else MTEditDataset
+    train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
+    eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     logger.info('loaded datasets')
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=train_dataset.collate_fn, num_workers=config['num_workers'])

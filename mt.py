@@ -254,7 +254,7 @@ class MTEditDataset(MTDataset):
             padding_value=-1
         )
         
-        return {'src_ids': src_ids, 'input_ids': input_ids, 'output_ids': output_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
+        return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': output_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
 class MTEvolver(nn.Module):
 
@@ -540,7 +540,7 @@ def train_step(model, batch, device, step=None, reduce=True):
     if isinstance(model, MTTransformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
     else:
-        op_loss, tok_loss, idx_loss = model.step({'src_ids': batch['src_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+        op_loss, tok_loss, idx_loss = model.step({'src_ids': batch['src_ids'].to(device), 'input_ids': batch['input_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)
         return op_loss + tok_loss + idx_loss
 
@@ -558,12 +558,12 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         if isinstance(model, MTTransformer):
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate(batch['src_ids'])
+            generated_ids = model.generate(batch['src_ids'].to(device))
             
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate({'src_ids': batch['src_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+            generated_ids = model.generate({'src_ids': batch['src_ids'].to(device), 'output_ids': batch['output_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         
         for hyp, ref in zip(generated_ids, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)

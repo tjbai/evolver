@@ -1,5 +1,5 @@
 {
-    "model_type": "decoder_only",
+    "model_type": "evolver",
     "d_model": 16,
     "dim_feedforward": 64,
     "nhead": 2,
@@ -16,7 +16,7 @@
     "grad_accum_steps": 1,
     "log_every": 10,
     "eval_every": 1000,
-    "num_eval_steps": 100,
+    "num_eval_steps": 20,
     "save_every": 5000,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints"
 }

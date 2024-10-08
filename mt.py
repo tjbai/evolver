@@ -215,7 +215,7 @@ class MTEditDataset(MTDataset):
         input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
         t = random.randint(0, len(input_ids)-2)
-        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'output_ids': input_ids[t+1], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'tgt_ids': input_ids[t+1], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
     
     def collate_fn(self, batch):
         src_ids = torch.nn.utils.rnn.pad_sequence(
@@ -230,8 +230,8 @@ class MTEditDataset(MTDataset):
             padding_value=self.tokenizer.pad_token_id
         )
         
-        output_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['output_ids']) for item in batch],
+        tgt_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['tgt_ids']) for item in batch],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id
         )
@@ -254,7 +254,7 @@ class MTEditDataset(MTDataset):
             padding_value=-1
         )
         
-        return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': output_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
+        return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': tgt_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
 class MTEvolver(nn.Module):
 
@@ -314,13 +314,11 @@ class MTEvolver(nn.Module):
     def forward(self, batch, cache=None):
         src_ids = batch['src_ids']
         input_ids = batch['input_ids']
-        output_ids = batch['output_ids']
-        
-        N_pref = src_ids.shape[1]
+        tgt_ids = batch['tgt_ids']
         
         src_embed = self.embed(src_ids)
         input_embed = self.embed(input_ids)
-        tgt = self.embed(output_ids)
+        tgt = self.embed(tgt_ids)
 
         src = torch.cat([src_embed, input_embed], dim=1)
         pad_mask = torch.cat([src_ids, input_ids], dim=1).eq(self.pad_token_id)
@@ -330,7 +328,7 @@ class MTEvolver(nn.Module):
         op_probs = F.log_softmax(self.op_head(h), dim=-1)
         tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
-        idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))[:, :, N_pref:]
+        idx_weights = torch.log(torch.clamp(idx_weights, 1e-7, 1-1e-7))[:, :, src_ids.shape[1]:]
         idx_probs = F.log_softmax(idx_weights, dim=-1)
         
         return (op_probs, tok_probs, idx_probs), cache
@@ -375,7 +373,7 @@ class MTEvolver(nn.Module):
         for _ in range(max_steps):
             if not alive.any(): break
             
-            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids'], 'output_ids': batch['output_ids'], 'edit_ids': (op_ids, tok_ids, idx_ids)}
+            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids'], 'tgt_ids': batch['tgt_ids'], 'edit_ids': (op_ids, tok_ids, idx_ids)}
             probs, cache = self.forward(batch, cache=cache)
             next_op, next_tok, next_idx = tuple(map(lambda x: x[:, -1], probs))
             
@@ -390,16 +388,16 @@ class MTEvolver(nn.Module):
             tok_ids = torch.cat([tok_ids, tok_id], dim=1)
             idx_ids = torch.cat([idx_ids, idx_id], dim=1)
 
-            output_ids = self.apply_edits(batch['input_ids'], (op_ids, tok_ids, idx_ids))
-            alive[output_ids[:, -1] == self.eos_token_id] = False
+            tgt_ids = self.apply_edits(batch['input_ids'], (op_ids, tok_ids, idx_ids))
+            alive[tgt_ids[:, -1] == self.eos_token_id] = False
             
-        return output_ids
+        return tgt_ids
     
     def generate(self, batch, max_depth=10, max_steps=128):
         self.decoder.set_causal()
         traj = [batch['input_ids']]
         for _ in range(max_depth):
-            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1], 'output_ids': batch['output_ids'], 'edit_ids': batch['edit_ids']}
+            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1], 'tgt_ids': batch['tgt_ids'], 'edit_ids': batch['edit_ids']}
             traj.append(self._generate(batch, max_steps))
         self.decoder.set_parallel()
         return traj[-1]
@@ -536,12 +534,22 @@ def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
     
-def train_step(model, batch, device, step=None, reduce=True):
+def train_step(model, batch, device, step=None):
     if isinstance(model, MTTransformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
     else:
-        op_loss, tok_loss, idx_loss = model.step({'src_ids': batch['src_ids'].to(device), 'input_ids': batch['input_ids'].to(device), 'tgt_ids': batch['tgt_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
-        if step is not None: log_to_wandb({'train/op_loss': op_loss, 'train/tok_loss': tok_loss, 'train/idx_loss': idx_loss}, step=step)
+        op_loss, tok_loss, idx_loss = model.step({
+            'src_ids': batch['src_ids'].to(device),
+            'input_ids': batch['input_ids'].to(device),
+            'tgt_ids': batch['tgt_ids'].to(device),
+            'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))
+        })
+        if step is not None:
+            log_to_wandb({
+                'train/op_loss': op_loss,
+                'train/tok_loss': tok_loss,
+                'train/idx_loss': idx_loss},
+            step=step)
         return op_loss + tok_loss + idx_loss
 
 @torch.no_grad()
@@ -563,7 +571,12 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate({'src_ids': batch['src_ids'].to(device), 'output_ids': batch['output_ids'].to(device), 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+            generated_ids = model.generate({
+                'src_ids': batch['src_ids'].to(device),
+                'input_ids': batch['input_ids'].to(device),
+                'tgt_ids': batch['tgt_ids'].to(device),
+                'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))
+            })
         
         for hyp, ref in zip(generated_ids, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)

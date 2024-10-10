@@ -1,7 +1,6 @@
 import os
 import json
-import math
-import pickle
+
 from datetime import datetime
 from const import *
 
@@ -48,3 +47,7 @@ def xent(logprobs, tgts, ignore=-1, ignore_mask=None):
     tot = torch.sum(loss)
     n = torch.sum(keep_mask)
     return -tot, n
+
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        return json.load(f)

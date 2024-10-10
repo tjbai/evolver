@@ -17,6 +17,6 @@
     "log_every": 10,
     "eval_every": 1000,
     "num_eval_steps": 100,
-    "save_every": 5000,
+    "save_every": 1e10,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints"
 }

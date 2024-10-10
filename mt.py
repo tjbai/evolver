@@ -488,25 +488,68 @@ class MTTransformer(nn.Module):
         return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
     
     @torch.no_grad()
-    def generate(self, src_ids, temperature=1.0, **_):
+    def generate(self, src_ids, beam_size=4, temperature=1.0, **_):
         B = src_ids.shape[0]
         device = src_ids.device
         self.decoder.set_causal()
         
-        tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
-        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        tgt_ids = torch.full((B * beam_size, 1), self.bos_token_id, dtype=torch.long, device=device)
+        src_ids = src_ids.repeat_interleave(beam_size, dim=0)
+        
+        beam_scores = torch.zeros((B, beam_size), device=device)
+        beam_scores[:, 1:] = -1e9
+        
+        finished = torch.zeros(B * beam_size, dtype=torch.bool, device=device)
         
         cache = None
         for _ in range(self.max_len):
-            logits, cache = self.forward({'src_ids': src_ids.to(device), 'tgt_ids': tgt_ids.to(device)}, cache=cache)
+            logits, cache = self.forward({'src_ids': src_ids, 'tgt_ids': tgt_ids}, cache=cache)
             next_tok_logits = logits[:, -1, :] / temperature
-            next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
-            tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
-            finished |= (next_tok.squeeze(-1) == self.eos_token_id)
+            
+            vocab_size = next_tok_logits.shape[-1]
+            log_probs = F.log_softmax(next_tok_logits, dim=-1)
+            
+            log_probs = log_probs.view(B, beam_size, -1)
+            next_scores = beam_scores.unsqueeze(-1) + log_probs
+            next_scores, next_tokens = next_scores.view(B, -1).topk(beam_size, dim=1)
+            beam_scores = next_scores
+            
+            beam_indices = next_tokens // vocab_size
+            token_indices = next_tokens % vocab_size
+            
+            tgt_ids = tgt_ids.view(B, beam_size, -1)
+            tgt_ids = torch.cat([tgt_ids[torch.arange(B).unsqueeze(1), beam_indices], token_indices.unsqueeze(-1)], dim=-1)
+            tgt_ids = tgt_ids.view(B * beam_size, -1)
+            
+            finished |= (token_indices == self.eos_token_id).view(-1)
+            
             if finished.all(): break
         
+        tgt_ids = tgt_ids.view(B, beam_size, -1)
+        best_beam = beam_scores.argmax(dim=1)
+        tgt_ids = tgt_ids[torch.arange(B), best_beam]
+        
         self.decoder.set_parallel()
-        return tgt_ids
+        return tgt_ids 
+        
+        # B = src_ids.shape[0]
+        # device = src_ids.device
+        # self.decoder.set_causal()
+        
+        # tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
+        # finished = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        # cache = None
+        # for _ in range(self.max_len):
+        #     logits, cache = self.forward({'src_ids': src_ids.to(device), 'tgt_ids': tgt_ids.to(device)}, cache=cache)
+        #     next_tok_logits = logits[:, -1, :] / temperature
+        #     next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
+        #     tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
+        #     finished |= (next_tok.squeeze(-1) == self.eos_token_id)
+        #     if finished.all(): break
+        
+        # self.decoder.set_parallel()
+        # return tgt_ids
     
 def init_model(config, tokenizer):
     if config['model_type'] == 'decoder_only':

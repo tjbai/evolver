@@ -11,3 +11,4 @@ pytorch-lightning==2.3.3
 timm==1.0.9
 sacrebleu==2.4.3
 sentencepiece==0.2.0
+sacremoses==0.1.1

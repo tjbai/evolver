@@ -18,6 +18,7 @@ from sacrebleu import corpus_bleu
 from tqdm import tqdm
 from datasets import load_dataset
 from transformers import BertTokenizer as TransformersBertTokenizer
+from transformers import MarianTokenizer as TransformersMarianTokenizer
 
 from embed import SinusoidalEmbedding
 from trans import (
@@ -94,9 +95,30 @@ class BertTokenizer:
     def decode(self, tok_ids, skip_special_tokens=True, **_):
         return self.tokenizer.decode(tok_ids, skip_special_tokens=skip_special_tokens)
     
+class MarianTokenizer:
+    
+    def __init__(self):
+        self.tokenizer = TransformersMarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
+        self.vocab_size = self.tokenizer.vocab_size + 1
+        self.pad_token_id = 58100
+        self.eos_token_id = 0
+        self.unk_token_id = 1
+        self.bos_token_id = self.tokenizer.vocab_size
+
+    def get_id(self, t):
+        if t == '<s>': return self.bos_token_id
+        return self.tokenizer.get_vocab().get(t, self.unk_token_id)
+
+    def encode(self, text, **_):
+        return [self.bos_token_id] + self.tokenizer(text)['input_ids']
+
+    def decode(self, tok_ids, skip_special_tokens=True, **_):
+        if skip_special_tokens: return self.tokenizer.decode(tok_ids[1:], skip_special_tokens=True)
+        else: return '<s>' + self.tokenizer.decode(tok_ids[1:], skip_special_tokens=False)
+    
 class MTDataset(Dataset):
 
-    def __init__(self, split='train', max_len=256, buffer_size=1000, tokenizer=SpacyTokenizer()):
+    def __init__(self, split='train', max_len=256, buffer_size=1000, tokenizer=MarianTokenizer()):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
         self.tokenizer = tokenizer
@@ -589,7 +611,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
 def train(config):
     device = torch.device(config['device'])
     
-    tokenizer = BertTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
+    tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
 
     dataset = MTDataset if config['model_type'] == 'decoder_only' else MTEditDataset
     train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
@@ -602,6 +624,10 @@ def train(config):
     model = init_model(config, tokenizer)
     optim = AdamW(model.parameters(), lr=config['lr'])
     start_step = load_checkpoint(model, optim, config)
+    
+    logger.info('eval sanity check')
+    evaluate(model, eval_loader, device, 1, tokenizer)
+    logger.info('sanity check passed')
     
     model.train()
     for step, batch in tqdm(
@@ -618,15 +644,15 @@ def train(config):
             optim.step()
             optim.zero_grad()
 
-        if step % config['log_every'] == 0:
+        if (step + 1) % config['log_every'] == 0:
             log_to_wandb({'train/loss': loss.item()}, step=step)
 
-        if step % config['eval_every'] == 0:
+        if (step + 1) % config['eval_every'] == 0:
             eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
             log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
             model.train()
 
-        if step % config['save_every'] == 0:
+        if (step + 1) % config['save_every'] == 0:
             save_checkpoint(model, optim, step, config)
 
     eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)

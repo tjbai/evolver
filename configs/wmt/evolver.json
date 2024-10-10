@@ -1,5 +1,5 @@
 {
-    "model_type": "decoder_only",
+    "model_type": "evolver",
     "d_model": 512,
     "dim_feedforward": 2048,
     "nhead": 8,

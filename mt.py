@@ -605,7 +605,10 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
             ref_text = tokenizer.decode(ref)
             hyps.append(hyp_text)
             refs.append(ref_text)
-    
+            
+    logger.info(f'sample hyp: {hyps[0]}')
+    logger.info(f'sample ref: {refs[0]}')
+
     return tot_loss / num_eval_steps, corpus_bleu(hyps, [refs]).score
 
 def train(config):

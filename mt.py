@@ -137,7 +137,7 @@ class MTDataset(Dataset):
         src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
         tgt_ids = self.tokenizer.encode(item['en'], lang='en')[:self.max_len]
 
-        return {'src_ids': src_ids, 'tgt_ids': tgt_ids} 
+        return {'src_ids': src_ids, 'tgt_ids': tgt_ids}
     
     def refill_buffer(self):
         start_idx = random.randint(0, len(self.dataset) - self.buffer_size)
@@ -233,7 +233,7 @@ class MTEditDataset(MTDataset):
         item = self.buffer[self.buffer_index]
         self.buffer_index += 1
         
-        src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
+        src_ids = self.tokenizer.encode(item['de'], lang='de')
         input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
         t = random.randint(0, len(input_ids)-2)
@@ -243,38 +243,32 @@ class MTEditDataset(MTDataset):
         src_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['src_ids']) for item in batch],
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
-        )
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
         
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['input_ids']) for item in batch],
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
-        )
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
         
         tgt_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['tgt_ids']) for item in batch],
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
-        )
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
 
         op_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['edit_ids'][0]) for item in batch],
             batch_first=True,
-            padding_value=-1
-        )
+            padding_value=-1)[:, :self.max_len]
        
         tok_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['edit_ids'][1]) for item in batch],
             batch_first=True,
-            padding_value=-1
-        )
+            padding_value=-1)[:, :self.max_len]
         
         idx_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['edit_ids'][2]) for item in batch],
             batch_first=True,
-            padding_value=-1
-        )
+            padding_value=-1)[:, :self.max_len]
         
         return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': tgt_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
 

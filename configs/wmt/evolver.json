@@ -1,5 +1,6 @@
 {
     "model_type": "evolver",
+    "from_checkpoint": "/scratch4/jeisner1/checkpoints/mt_evolver_512d_6enc_6dec-20241011_155036_100000.pt",
     "d_model": 512,
     "dim_feedforward": 2048,
     "nhead": 8,
@@ -9,14 +10,14 @@
     "decoder_layers": 6,
     "max_len": 128,
     "buffer_size": 1000,
-    "batch_size": 32,
+    "batch_size": 16,
     "num_workers": 4,
     "lr": 3e-4,
-    "train_steps": 100000,
-    "grad_accum_steps": 1,
-    "log_every": 10,
-    "eval_every": 5000,
+    "train_steps": 200000,
+    "grad_accum_steps": 16,
+    "log_every": 16,
+    "eval_every": 25000,
     "num_eval_steps": 20,
-    "save_every": 5000,
+    "save_every": 10000,
     "checkpoint_dir": "/scratch4/jeisner1/checkpoints"
 }

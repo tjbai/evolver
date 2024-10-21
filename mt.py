@@ -723,9 +723,8 @@ def train_step(model, batch, device, step=None):
                 'train/op_loss': loss[0],
                 'train/tok_loss': loss[1],
                 'train/idx_loss': loss[2]}, step=step)
-            return sum(loss)
-        
-        return loss
+
+        return sum(loss) if isinstance(model, Evolver) else loss
 
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
@@ -839,8 +838,6 @@ def train(config):
             log_to_wandb({'train/loss': loss.item()}, step=step)
 
         if (step + 1) % config['eval_every'] == 0:
-            logger.info(f'step: {step}')
-            logger.info(f'mod: {(step + 1) % config["eval_every"]}')
             eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
             log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
             model.train()

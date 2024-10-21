@@ -1,6 +1,6 @@
 {
-    "model_type": "evolver",
-    "from_checkpoint": "/scratch4/jeisner1/checkpoints/mt_evolver_512d_6enc_6dec-20241011_155036_100000.pt",
+    "model_type": "teacher",
+    "from_checkpoint": "/scratch4/jeisner1/checkpoints/mt_teacher_512d_6enc_6dec-20241020_221028_39999.pt",
     "d_model": 512,
     "dim_feedforward": 2048,
     "nhead": 8,

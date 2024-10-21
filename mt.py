@@ -118,7 +118,14 @@ class MarianTokenizer:
     
 class MTDataset(Dataset):
 
-    def __init__(self, split='train', max_len=256, buffer_size=1000, tokenizer=MarianTokenizer()):
+    def __init__(
+        self,
+        split='train',
+        max_len=256,
+        buffer_size=1000,
+        tokenizer=MarianTokenizer(),
+        truncate=None
+    ):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
         self.tokenizer = tokenizer
@@ -126,8 +133,12 @@ class MTDataset(Dataset):
         self.buffer_index = 0
         self.buffer_size = buffer_size
 
+        if truncate is not None:
+            self.buffer_size = min(buffer_size, truncate)
+            self.dataset = self.dataset.select(range(truncate))
+
     def __len__(self):
-        return len(self.dataset)
+        return int(1e12)
 
     def __getitem__(self, _):
         if self.buffer_index >= len(self.buffer): self.refill_buffer()
@@ -237,6 +248,7 @@ class TrajectoryDataset(MTDataset):
         input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
         t = random.randint(0, len(input_ids)-2)
+
         return {
             'src_ids': src_ids,
             'root_ids': input_ids[0],
@@ -582,7 +594,9 @@ class Teacher(nn.Module):
         dropout=0,
         layer_norm_eps=1e-5,
         encoder_layers=6,
-        decoder_layers=6):
+        decoder_layers=6,
+        **_
+    ):
         
         super().__init__()
         
@@ -629,8 +643,17 @@ class Teacher(nn.Module):
         
         return tok_probs, cache
     
+    def embed(self, x):
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
+        x = self.positional_embedding(x, d=1)
+        return x
+    
+    def step(self, batch, reduce=True):
+        tok_probs, _ = self.forward(batch)
+        return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
+    
     @torch.no_grad()
-    def _generate(self, batch, max_steps, temp=0.7, **_):
+    def _generate(self, batch, temp=0.7, **_):
         src_ids = batch['src_ids']
         input_ids = batch['input_ids']
         
@@ -664,44 +687,6 @@ class Teacher(nn.Module):
             traj.append(self._generate(batch))
         self.decoder.set_parallel()
         return traj
-    
-def init_model(config, tokenizer):
-    logger.info(f'loading {config["model_type"]}')
-
-    config = {
-        'd_model': config['d_model'],
-        'dim_feedforward': config['dim_feedforward'],
-        'nhead': config['nhead'],
-        'dropout': config['dropout'],
-        'layer_norm_eps': config['layer_norm_eps'],
-        'decoder_layers': config['decoder_layers'],
-        'encoder_layers': config['encoder_layers'],
-        'vocab_size': tokenizer.vocab_size,
-        'max_len': config['max_len'],
-        'pad_token_id': tokenizer.pad_token_id,
-        'bos_token_id': tokenizer.bos_token_id,
-        'eos_token_id': tokenizer.eos_token_id,
-        'name': config['name']
-    }
-    
-    if config['model_type'] == 'decoder_only':
-        return Transformer(**config).to(config['device'])
-        
-    elif config['model_type'] == 'evolver':
-        return Evolver(**config).to(config['device'])
-        
-    else:
-        return Teacher(**config).to(config['device'])
-    
-def load_checkpoint(model, optimizer, config):
-    if config['from_checkpoint']:
-        checkpoint = torch.load(config['from_checkpoint'])
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_step = checkpoint['step'] + 1
-        logger.info(f'resuming from step {start_step}')
-        return start_step
-    return 0
 
 def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
@@ -711,19 +696,21 @@ def train_step(model, batch, device, step=None):
     if isinstance(model, Transformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
     else:
-        op_loss, tok_loss, idx_loss = model.step({
+        loss = model.step({
             'src_ids': batch['src_ids'].to(device),
             'input_ids': batch['input_ids'].to(device),
             'tgt_ids': batch['tgt_ids'].to(device),
             'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))
         })
-        if step is not None:
+
+        if step is not None and isinstance(model, Evolver):
             log_to_wandb({
-                'train/op_loss': op_loss,
-                'train/tok_loss': tok_loss,
-                'train/idx_loss': idx_loss},
-            step=step)
-        return op_loss + tok_loss + idx_loss
+                'train/op_loss': loss[0],
+                'train/tok_loss': loss[1],
+                'train/idx_loss': loss[2]}, step=step)
+            return sum(loss)
+        
+        return loss
 
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
@@ -748,6 +735,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
                 'src_ids': batch['src_ids'].to(device),
                 'input_ids': batch['input_ids'].to(device),
                 'tgt_ids': batch['tgt_ids'].to(device),
+                'root_ids': batch['root_ids'].to(device),
                 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         
         for hyp, ref in zip(generated, batch['tgt_ids']):
@@ -760,27 +748,62 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
     logger.info(f'sample ref: {refs[0]}')
 
     return tot_loss / num_eval_steps, corpus_bleu(hyps, [refs]).score
+    
+def init_model(config, tokenizer):
+    params = {
+        'd_model': config['d_model'],
+        'dim_feedforward': config['dim_feedforward'],
+        'nhead': config['nhead'],
+        'dropout': config['dropout'],
+        'layer_norm_eps': config['layer_norm_eps'],
+        'decoder_layers': config['decoder_layers'],
+        'encoder_layers': config['encoder_layers'],
+        'vocab_size': tokenizer.vocab_size,
+        'max_len': config['max_len'],
+        'pad_token_id': tokenizer.pad_token_id,
+        'bos_token_id': tokenizer.bos_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+        'name': config['name']
+    }
+    
+    if config['model_type'] == 'decoder_only':
+        return Transformer(**params).to(config['device'])
+        
+    elif config['model_type'] == 'evolver':
+        return Evolver(**params).to(config['device'])
+        
+    else:
+        return Teacher(**params).to(config['device'])
+    
+def load_checkpoint(model, optimizer, config):
+    if config.get('from_checkpoint') is not None:
+        checkpoint = torch.load(config['from_checkpoint'])
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_step = checkpoint['step'] + 1
+        logger.info(f'resuming from step {start_step}')
+        return start_step
+    return 0
 
 def train(config):
     device = torch.device(config['device'])
     
     tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
-
     dataset = MTDataset if config['model_type'] == 'decoder_only' else TrajectoryDataset
-    train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
-    eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
-    logger.info('loaded datasets')
+    train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
+    eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
+    logger.info(f'loaded {dataset} datasets and {type(tokenizer)} tokenizer')
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=train_dataset.collate_fn, num_workers=config['num_workers'])
     eval_loader = DataLoader(eval_dataset, batch_size=config['batch_size'], collate_fn=eval_dataset.collate_fn, num_workers=config['num_workers'])
-    
+   
     model = init_model(config, tokenizer)
     optim = AdamW(model.parameters(), lr=config['lr'])
     start_step = load_checkpoint(model, optim, config)
     
-    logger.info('eval sanity check')
-    evaluate(model, eval_loader, device, 1, tokenizer)
-    logger.info('sanity check passed')
+    # logger.info('eval sanity check')
+    # evaluate(model, eval_loader, device, 1, tokenizer)
+    # logger.info('sanity check passed')
     
     model.train()
     for step, batch in tqdm(
@@ -801,6 +824,8 @@ def train(config):
             log_to_wandb({'train/loss': loss.item()}, step=step)
 
         if (step + 1) % config['eval_every'] == 0:
+            logger.info(f'step: {step}')
+            logger.info(f'mod: {(step + 1) % config["eval_every"]}')
             eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
             log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
             model.train()
@@ -822,7 +847,6 @@ def parse_args():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--local', action='store_true')
     return parser.parse_args()
-    
 
 def main():
     args = parse_args()

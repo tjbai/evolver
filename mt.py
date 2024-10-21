@@ -136,6 +136,7 @@ class MTDataset(Dataset):
         if truncate is not None:
             self.buffer_size = min(buffer_size, truncate)
             self.dataset = self.dataset.select(range(truncate))
+            logger.info(f'truncated to: {self.dataset["translation"]}')
 
     def __len__(self):
         return int(1e12)
@@ -595,7 +596,7 @@ class Teacher(nn.Module):
         layer_norm_eps=1e-5,
         encoder_layers=6,
         decoder_layers=6,
-        **_
+        name=None
     ):
         
         super().__init__()
@@ -610,6 +611,7 @@ class Teacher(nn.Module):
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+        self.name = name
         
         t_params = {
             'd_model': d_model,

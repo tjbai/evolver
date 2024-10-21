@@ -1,0 +1,23 @@
+{
+    "model_type": "teacher",
+    "d_model": 64,
+    "dim_feedforward": 256,
+    "nhead": 4,
+    "dropout": 0.0,
+    "layer_norm_eps": 1e-5,
+    "encoder_layers": 4,
+    "decoder_layers": 4,
+    "max_len": 128,
+    "buffer_size": 4,
+    "batch_size": 4,
+    "num_workers": 4,
+    "lr": 1e-3,
+    "train_steps": 5000,
+    "grad_accum_steps": 1,
+    "log_every": 1,
+    "eval_every": 1000,
+    "num_eval_steps": 1,
+    "save_every": 1e9,
+    "truncate": 4,
+    "checkpoint_dir": "/scratch4/jeisner1/checkpoints"
+}

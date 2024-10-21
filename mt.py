@@ -388,10 +388,14 @@ class Evolver(nn.Module):
         
         return res
     
-    def _generate(self, batch, max_steps):
-        B = batch['src_ids'].shape[0]
-        device = batch['src_ids'].device
+    def _generate(self, batch):
+        src_ids = batch['src_ids'] 
+        input_ids = batch['input_ids']
         
+        B = src_ids.shape[0]
+        device = src_ids.device
+        
+        tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
         op_ids = torch.full((B, 1), 1, dtype=torch.long, device=device)
         tok_ids = torch.full((B, 1), -1, dtype=torch.long, device=device)
         idx_ids = torch.full((B, 1), 0, dtype=torch.long, device=device)
@@ -399,12 +403,12 @@ class Evolver(nn.Module):
         alive = torch.ones(B, dtype=torch.bool)
        
         cache = None
-        for _ in range(max_steps):
+        for _ in range(self.max_len):
             if not alive.any(): break
             
             batch = {
-                'src_ids': batch['src_ids'],
-                'input_ids': batch['input_ids'],
+                'src_ids': src_ids,
+                'input_ids': input_ids,
                 'tgt_ids': tgt_ids,
                 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
@@ -422,18 +426,17 @@ class Evolver(nn.Module):
             tok_ids = torch.cat([tok_ids, tok_id], dim=1)
             idx_ids = torch.cat([idx_ids, idx_id], dim=1)
 
-            tgt_ids = self.apply_edits(batch['input_ids'], (op_ids, tok_ids, idx_ids))
+            tgt_ids = self.apply_edits(input_ids, (op_ids, tok_ids, idx_ids))
             alive[tgt_ids[:, -1] == self.eos_token_id] = False
             
         return tgt_ids
     
-    def generate(self, batch, max_depth=10, max_steps=128):
+    def rollout(self, batch, T=10):
         self.decoder.set_causal()
-        B = batch['input_ids'].shape[0]
-        traj = [torch.full()]
-        for _ in range(max_depth):
-            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1], 'tgt_ids': batch['tgt_ids'], 'edit_ids': batch['edit_ids']}
-            traj.append(self._generate(batch, max_steps))
+        traj = [batch['root_ids']]
+        for _ in range(T):
+            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
+            traj.append(self._generate(batch))
         self.decoder.set_parallel()
         return traj
     
@@ -563,40 +566,132 @@ class Transformer(nn.Module):
         
         # self.decoder.set_parallel()
         # return tgt_ids
+        
+class Teacher(nn.Module):
+    
+    def __init__(
+        self,
+        vocab_size,
+        pad_token_id,
+        bos_token_id,
+        eos_token_id,
+        max_len,
+        d_model=512,
+        dim_feedforward=2048,
+        nhead=8,
+        dropout=0,
+        layer_norm_eps=1e-5,
+        encoder_layers=6,
+        decoder_layers=6):
+        
+        super().__init__()
+        
+        self.d_model = d_model
+        self.dim_feedforward = dim_feedforward
+        self.nhead = nhead
+        self.dropout = dropout
+        self.layer_norm_eps = layer_norm_eps
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        
+        t_params = {
+            'd_model': d_model,
+            'dim_feedforward': dim_feedforward,
+            'nhead': nhead,
+            'dropout': dropout,
+            'layer_norm_eps': layer_norm_eps}
+        
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
+       
+        encoder_layer = TransformerEncoderLayer(**t_params)
+        decoder_layer = CausalTransformerDecoderLayer(**t_params)
+        self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
+        self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
+        
+        self.tok_head = nn.Linear(d_model, vocab_size)
+    
+    def forward(self, batch, cache=None):
+        src_ids = batch['src_ids']
+        input_ids = batch['input_ids']
+        tgt_ids = batch['tgt_ids']
+        
+        src = torch.cat([self.embed(src_ids), self.embed(input_ids)], dim=1)
+        pad_mask = torch.cat([src_ids, input_ids], dim=1).eq(self.pad_token_id)
+        tgt = self.embed(tgt_ids)
+        
+        mem = self.encoder(src, src_key_padding_mask=pad_mask)
+        h, _, cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
+        tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
+        
+        return tok_probs, cache
+    
+    @torch.no_grad()
+    def _generate(self, batch, max_steps, temp=0.7, **_):
+        src_ids = batch['src_ids']
+        input_ids = batch['input_ids']
+        
+        B = src_ids.shape[0]
+        device = src_ids.device
+        
+        tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        cache = None
+        for _ in range(self.max_len):
+            logits, cache = self.forward({
+                'src_ids': src_ids.to(device),
+                'input_ids': input_ids.to(device),
+                'tgt_ids': tgt_ids.to(device)}, cache=cache)
+
+            next_tok_logits = logits[:, -1, :] / temp
+            next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
+            tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
+
+            finished |= (next_tok.squeeze(-1) == self.eos_token_id)
+            if finished.all(): break
+        
+        return tgt_ids
+        
+    def rollout(self, batch, T=10):
+        self.decoder.set_causal()
+        traj = [batch['root_ids']]
+        for _ in range(T):
+            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids']}
+            traj.append(self._generate(batch))
+        self.decoder.set_parallel()
+        return traj
     
 def init_model(config, tokenizer):
+    logger.info(f'loading {config["model_type"]}')
+
+    config = {
+        'd_model': config['d_model'],
+        'dim_feedforward': config['dim_feedforward'],
+        'nhead': config['nhead'],
+        'dropout': config['dropout'],
+        'layer_norm_eps': config['layer_norm_eps'],
+        'decoder_layers': config['decoder_layers'],
+        'encoder_layers': config['encoder_layers'],
+        'vocab_size': tokenizer.vocab_size,
+        'max_len': config['max_len'],
+        'pad_token_id': tokenizer.pad_token_id,
+        'bos_token_id': tokenizer.bos_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+        'name': config['name']
+    }
+    
     if config['model_type'] == 'decoder_only':
-        return Transformer(
-            d_model=config['d_model'],
-            dim_feedforward=config['dim_feedforward'],
-            nhead=config['nhead'],
-            dropout=config['dropout'],
-            layer_norm_eps=config['layer_norm_eps'],
-            decoder_layers=config['decoder_layers'],
-            encoder_layers=config['encoder_layers'],
-            vocab_size=tokenizer.vocab_size,
-            max_len=config['max_len'],
-            pad_token_id=tokenizer.pad_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            name=config['name']
-        ).to(config['device'])
+        return Transformer(**config).to(config['device'])
         
-    return Evolver(
-        d_model=config['d_model'],
-        dim_feedforward=config['dim_feedforward'],
-        nhead=config['nhead'],
-        dropout=config['dropout'],
-        layer_norm_eps=config['layer_norm_eps'],
-        decoder_layers=config['decoder_layers'],
-        encoder_layers=config['encoder_layers'],
-        vocab_size=tokenizer.vocab_size,
-        max_len=config['max_len'],
-        pad_token_id=tokenizer.pad_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        name=config['name'],
-    ).to(config['device'])
+    elif config['model_type'] == 'evolver':
+        return Evolver(**config).to(config['device'])
+        
+    else:
+        return Teacher(**config).to(config['device'])
     
 def load_checkpoint(model, optimizer, config):
     if config['from_checkpoint']:
@@ -649,7 +744,7 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            *_, generated = model.generate({
+            *_, generated = model.rollout({
                 'src_ids': batch['src_ids'].to(device),
                 'input_ids': batch['input_ids'].to(device),
                 'tgt_ids': batch['tgt_ids'].to(device),

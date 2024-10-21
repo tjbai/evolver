@@ -726,7 +726,6 @@ def parse_args():
     parser.add_argument('--config')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--local', action='store_true')
-    parser.add_argument('--from-checkpoint')
     return parser.parse_args()
     
 
@@ -735,7 +734,6 @@ def main():
     config = load_config(args.config)
     config['device'] = args.device
     config['local'] = args.local
-    config['from_checkpoint'] = args.from_checkpoint
     config['name'] = f"mt_{config['model_type']}_{config['d_model']}d_{config.get('encoder_layers', 0)}enc_{config['decoder_layers']}dec-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if not config['local']: wandb.init(project='mt-evolver', name=config['name'], config=config, resume='allow')
     train(config)

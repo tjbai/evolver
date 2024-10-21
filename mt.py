@@ -163,7 +163,7 @@ class MTDataset(Dataset):
         
         return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded}
     
-class MTEditDataset(MTDataset):
+class TrajectoryDataset(MTDataset):
     
     def depth(self, doc):
         root = [tok for tok in doc if tok.head == tok] [0]
@@ -237,7 +237,12 @@ class MTEditDataset(MTDataset):
         input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
         t = random.randint(0, len(input_ids)-2)
-        return {'src_ids': src_ids, 'input_ids': input_ids[t], 'tgt_ids': input_ids[t+1], 'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+        return {
+            'src_ids': src_ids,
+            'root_ids': input_ids[0],
+            'input_ids': input_ids[t],
+            'tgt_ids': input_ids[t+1],
+            'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
     
     def collate_fn(self, batch):
         src_ids = torch.nn.utils.rnn.pad_sequence(
@@ -247,6 +252,11 @@ class MTEditDataset(MTDataset):
         
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['input_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
+        
+        root_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['root_ids']) for item in batch],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
         
@@ -270,9 +280,14 @@ class MTEditDataset(MTDataset):
             batch_first=True,
             padding_value=-1)[:, :self.max_len]
         
-        return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': tgt_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
+        return {
+            'src_ids': src_ids,
+            'root_ids': root_ids,
+            'input_ids': input_ids,
+            'tgt_ids': tgt_ids,
+            'edit_ids': (op_ids, tok_ids, idx_ids)}
 
-class MTEvolver(nn.Module):
+class Evolver(nn.Module):
 
     def __init__(
         self,
@@ -299,8 +314,7 @@ class MTEvolver(nn.Module):
             'dim_feedforward': dim_feedforward,
             'nhead': nhead,
             'dropout': dropout,
-            'layer_norm_eps': layer_norm_eps
-        }
+            'layer_norm_eps': layer_norm_eps}
         
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
@@ -319,8 +333,7 @@ class MTEvolver(nn.Module):
             dropout=dropout,
             bias=True,
             add_bias_kv=False,
-            add_zero_attn=False
-        )
+            add_zero_attn=False)
         
     def embed(self, x):
         x = self.token_embedding(x) * math.sqrt(self.d_model)
@@ -385,11 +398,16 @@ class MTEvolver(nn.Module):
         
         alive = torch.ones(B, dtype=torch.bool)
        
-        cache = None 
+        cache = None
         for _ in range(max_steps):
             if not alive.any(): break
             
-            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids'], 'tgt_ids': batch['tgt_ids'], 'edit_ids': (op_ids, tok_ids, idx_ids)}
+            batch = {
+                'src_ids': batch['src_ids'],
+                'input_ids': batch['input_ids'],
+                'tgt_ids': tgt_ids,
+                'edit_ids': (op_ids, tok_ids, idx_ids)}
+
             probs, cache = self.forward(batch, cache=cache)
             next_op, next_tok, next_idx = tuple(map(lambda x: x[:, -1], probs))
             
@@ -411,14 +429,15 @@ class MTEvolver(nn.Module):
     
     def generate(self, batch, max_depth=10, max_steps=128):
         self.decoder.set_causal()
-        traj = [batch['input_ids']]
+        B = batch['input_ids'].shape[0]
+        traj = [torch.full()]
         for _ in range(max_depth):
             batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1], 'tgt_ids': batch['tgt_ids'], 'edit_ids': batch['edit_ids']}
             traj.append(self._generate(batch, max_steps))
         self.decoder.set_parallel()
-        return traj[-1]
+        return traj
     
-class MTTransformer(nn.Module):
+class Transformer(nn.Module):
     
     def __init__(
         self,
@@ -547,7 +566,7 @@ class MTTransformer(nn.Module):
     
 def init_model(config, tokenizer):
     if config['model_type'] == 'decoder_only':
-        return MTTransformer(
+        return Transformer(
             d_model=config['d_model'],
             dim_feedforward=config['dim_feedforward'],
             nhead=config['nhead'],
@@ -563,7 +582,7 @@ def init_model(config, tokenizer):
             name=config['name']
         ).to(config['device'])
         
-    return MTEvolver(
+    return Evolver(
         d_model=config['d_model'],
         dim_feedforward=config['dim_feedforward'],
         nhead=config['nhead'],
@@ -594,7 +613,7 @@ def save_checkpoint(model, optimizer, step, config):
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
     
 def train_step(model, batch, device, step=None):
-    if isinstance(model, MTTransformer):
+    if isinstance(model, Transformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
     else:
         op_loss, tok_loss, idx_loss = model.step({
@@ -622,22 +641,21 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
     for i, batch in enumerate(tqdm(eval_loader, desc="eval...", total=num_eval_steps)):
         if i >= num_eval_steps: break
         
-        if isinstance(model, MTTransformer):
+        if isinstance(model, Transformer):
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate(batch['src_ids'].to(device))
+            generated = model.generate(batch['src_ids'].to(device))
             
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            generated_ids = model.generate({
+            *_, generated = model.generate({
                 'src_ids': batch['src_ids'].to(device),
                 'input_ids': batch['input_ids'].to(device),
                 'tgt_ids': batch['tgt_ids'].to(device),
-                'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))
-            })
+                'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         
-        for hyp, ref in zip(generated_ids, batch['tgt_ids']):
+        for hyp, ref in zip(generated, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)
             ref_text = tokenizer.decode(ref)
             hyps.append(hyp_text)
@@ -653,7 +671,7 @@ def train(config):
     
     tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
 
-    dataset = MTDataset if config['model_type'] == 'decoder_only' else MTEditDataset
+    dataset = MTDataset if config['model_type'] == 'decoder_only' else TrajectoryDataset
     train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer)
     logger.info('loaded datasets')
@@ -710,6 +728,7 @@ def parse_args():
     parser.add_argument('--local', action='store_true')
     parser.add_argument('--from-checkpoint')
     return parser.parse_args()
+    
 
 def main():
     args = parse_args()

@@ -11,6 +11,14 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from utils import load_config
+from embed import SinusoidalEmbedding
+from trans import (
+    TransformerEncoderLayer,
+    TransformerEncoder,
+    CausalTransformerDecoderLayer,
+    CausalTransformerDecoder,
+    MultiheadPointer
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,21 +42,93 @@ class Evolver(nn.Module):
         
 class Teacher(nn.Module):
     
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        vocab_size,
+        pad_token_id,
+        bos_token_id,
+        eos_token_id,
+        max_len,
+        d_model=512,
+        dim_feedforward=2048,
+        nhead=8,
+        dropout=0,
+        layer_norm_eps=1e-5,
+        encoder_layers=6,
+        decoder_layers=6):
+        
+        super().__init__()
+        
+        self.d_model = d_model
+        self.dim_feedforward = dim_feedforward
+        self.nhead = nhead
+        self.dropout = dropout
+        self.layer_norm_eps = layer_norm_eps
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        
+        t_params = {
+            'd_model': d_model,
+            'dim_feedforward': dim_feedforward,
+            'nhead': nhead,
+            'dropout': dropout,
+            'layer_norm_eps': layer_norm_eps}
+        
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_embedding = SinusoidalEmbedding(d_model=d_model, max_len=max_len+1)
+       
+        encoder_layer = TransformerEncoderLayer(**t_params)
+        decoder_layer = CausalTransformerDecoderLayer(**t_params)
+        self.encoder = TransformerEncoder(encoder_layer, encoder_layers)
+        self.decoder = CausalTransformerDecoder(decoder_layer, decoder_layers)
+        
+        self.tok_head = nn.Linear(d_model, vocab_size)
     
-    def forward(self):
-        pass
-    
-    def generate(self, batch):
+    def forward(self, batch, cache=None):
+        src_ids = batch['src_ids']
         input_ids = batch['input_ids']
+        tgt_ids = batch['tgt_ids']
+        
+        src = torch.cat([self.embed(src_ids), self.embed(input_ids)], dim=1)
+        pad_mask = torch.cat([src_ids, input_ids], dim=1).eq(self.pad_token_id)
+        tgt = self.embed(tgt_ids)
+        
+        mem = self.encoder(src, src_key_padding_mask=pad_mask)
+        h, _, cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
+        tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
+        
+        return tok_probs, cache
+    
+    @torch.no_grad()
+    def generate(self, batch, temp=1.0, **_):
+        src_ids = batch['src_ids']
+        
+        B = src_ids.shape[0]
+        device = src_ids.device
+        self.decoder.set_causal()
+        
+        tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        cache = None
+        for _ in range(self.max_len):
+            logits, cache = self.forward({'src_ids': src_ids.to(device), 'tgt_ids': tgt_ids.to(device)}, cache=cache)
+            next_tok_logits = logits[:, -1, :] / temp
+            next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
+            tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
+            finished |= (next_tok.squeeze(-1) == self.eos_token_id)
+            if finished.all(): break
+        
+        self.decoder.set_parallel()
+        return tgt_ids
         
     def rollout(self, T):
+        traj = []
+        
         pass
-   
-def rollout(model, N, T):
-    # returns dict of {state, action}
-    pass
 
 def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
@@ -110,7 +190,6 @@ def train(config):
 def parse_args():
     parser = argparse.ArgumentParser() 
     parser.add_argument('--config')
-    
     return parser.parse_args()
 
 def main():

@@ -256,6 +256,19 @@ class TrajectoryDataset(MTDataset):
             'input_ids': input_ids[t],
             'tgt_ids': input_ids[t+1],
             'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+        
+    def collate_fn_reduced(self, batch):
+        src_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['src_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
+        
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(item['input_ids']) for item in batch],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
+        
+        return {'src_ids': src_ids, 'input_ids': input_ids}
     
     def collate_fn(self, batch):
         src_ids = torch.nn.utils.rnn.pad_sequence(
@@ -267,7 +280,7 @@ class TrajectoryDataset(MTDataset):
             [torch.tensor(item['input_ids']) for item in batch],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-        
+       
         root_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(item['root_ids']) for item in batch],
             batch_first=True,
@@ -685,7 +698,7 @@ class Teacher(nn.Module):
         self.decoder.set_causal()
         traj = [batch['root_ids']]
         for _ in range(T):
-            batch = {'src_ids': batch['src_ids'], 'input_ids': batch['input_ids']}
+            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
             traj.append(self._generate(batch))
         self.decoder.set_parallel()
         return traj
@@ -803,9 +816,9 @@ def train(config):
     optim = AdamW(model.parameters(), lr=config['lr'])
     start_step = load_checkpoint(model, optim, config)
     
-    # logger.info('eval sanity check')
-    # evaluate(model, eval_loader, device, 1, tokenizer)
-    # logger.info('sanity check passed')
+    logger.info('eval sanity check')
+    evaluate(model, eval_loader, device, 1, tokenizer)
+    logger.info('sanity check passed')
     
     model.train()
     for step, batch in tqdm(

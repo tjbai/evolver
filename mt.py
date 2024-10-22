@@ -67,10 +67,11 @@ class SpacyTokenizer:
         tokens = [self.get_id(token.text) for token in doc]
         if add_special_tokens: tokens = [self.bos_token_id] + tokens + [self.eos_token_id]
         return tokens
-    
+   
+    # i hate this 
     def decode(self, tok_ids, skip_special_tokens=True):
         tokens = []
-        for id in tok_ids.tolist():
+        for id in tok_ids.tolist() if isinstance(tok_ids, torch.Tensor) else tok_ids:
             token = self.id_to_tok.get(id, 'UNK')
             if not skip_special_tokens or (token not in {'PAD', 'BOS', 'EOS'}): tokens.append(token)
             if token == 'EOS': break
@@ -208,6 +209,11 @@ class TrajectoryDataset(MTDataset):
         tok_ids = []
         idx_ids = []
         
+        
+        '''
+        let's lose the pos placeholder idea
+        '''
+        
         last_len = 3
         for i, seq in enumerate(traj[1:]):
             cur_edits = [(CPY, -1, 0)]
@@ -246,16 +252,18 @@ class TrajectoryDataset(MTDataset):
         self.buffer_index += 1
         
         src_ids = self.tokenizer.encode(item['de'], lang='de')
-        input_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
+        traj_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
         
-        t = random.randint(0, len(input_ids)-2)
+        t = random.randint(0, len(traj_ids)-2)
 
         return {
             'src_ids': src_ids,
-            'root_ids': input_ids[0],
-            'input_ids': input_ids[t],
-            'tgt_ids': input_ids[t+1],
-            'edit_ids': tuple(map(lambda x: x[t], edit_ids))}
+            'root_ids': traj_ids[0],
+            'input_ids': traj_ids[t],
+            'tgt_ids': traj_ids[t+1],
+            'edit_ids': tuple(map(lambda x: x[t], edit_ids)),
+            'traj_ids':traj_ids 
+        }
         
     def collate_fn_reduced(self, batch):
         src_ids = torch.nn.utils.rnn.pad_sequence(
@@ -414,7 +422,7 @@ class Evolver(nn.Module):
         
         return res
     
-    def _generate(self, batch):
+    def _generate(self, batch, temp):
         src_ids = batch['src_ids'] 
         input_ids = batch['input_ids']
         
@@ -439,11 +447,11 @@ class Evolver(nn.Module):
                 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
             probs, cache = self.forward(batch, cache=cache)
-            next_op, next_tok, next_idx = tuple(map(lambda x: x[:, -1], probs))
+            next_op, next_tok, next_idx = tuple(map(lambda x: F.softmax(x[:, -1] / temp, dim=-1), probs))
             
-            op_id = torch.multinomial(next_op.exp(), num_samples=1)
-            tok_id = torch.multinomial(next_tok.exp(), num_samples=1)
-            idx_id = torch.multinomial(next_idx.exp(), num_samples=1)
+            op_id = torch.multinomial(next_op, num_samples=1)
+            tok_id = torch.multinomial(next_tok, num_samples=1)
+            idx_id = torch.multinomial(next_idx, num_samples=1)
             
             idx_id[op_id.eq(0)] = -1
             tok_id[op_id.eq(1)] = -1
@@ -457,12 +465,12 @@ class Evolver(nn.Module):
             
         return tgt_ids
     
-    def rollout(self, batch, T=10):
+    def rollout(self, batch, T=10, temp=1, verbose=False):
         self.decoder.set_causal()
         traj = [batch['root_ids']]
-        for _ in range(T):
+        for _ in tqdm(range(T), desc='rolling out', disable=not verbose):
             batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
-            traj.append(self._generate(batch))
+            traj.append(self._generate(batch, temp=temp))
         self.decoder.set_parallel()
         return traj
     
@@ -521,12 +529,12 @@ class Transformer(nn.Module):
         pad_mask = src_ids.eq(self.pad_token_id)
         mem = self.encoder(src, src_key_padding_mask=pad_mask)
         h, _, cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
-        tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
-        return tok_probs, cache
+        return self.tok_head(h), cache
        
     def step(self, batch, reduce=True):
-        tok_probs, _ = self.forward(batch)
+        h, _ = self.forward(batch)
+        tok_probs = F.log_softmax(h, dim=-1)
         return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
     
     @torch.no_grad()
@@ -654,9 +662,8 @@ class Teacher(nn.Module):
         
         mem = self.encoder(src, src_key_padding_mask=pad_mask)
         h, _, cache = self.decoder(tgt, mem, memory_key_padding_mask=pad_mask, cache=cache)
-        tok_probs = F.log_softmax(self.tok_head(h), dim=-1)
         
-        return tok_probs, cache
+        return self.tok_head(h), cache
     
     def embed(self, x):
         x = self.token_embedding(x) * math.sqrt(self.d_model)
@@ -664,7 +671,8 @@ class Teacher(nn.Module):
         return x
     
     def step(self, batch, reduce=True):
-        tok_probs, _ = self.forward(batch)
+        h, _ = self.forward(batch)
+        tok_probs = F.log_softmax(h, dim=-1)
         return F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['tgt_ids'][:, 1:], ignore_index=self.pad_token_id, reduction='mean' if reduce else 'sum')
     
     @torch.no_grad()
@@ -694,10 +702,10 @@ class Teacher(nn.Module):
         
         return tgt_ids
         
-    def rollout(self, batch, T=10):
+    def rollout(self, batch, T=10, verbose=False):
         self.decoder.set_causal()
         traj = [batch['root_ids']]
-        for _ in range(T):
+        for _ in tqdm(range(T), desc='rolling out', disable=not verbose):
             batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
             traj.append(self._generate(batch))
         self.decoder.set_parallel()

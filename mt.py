@@ -201,39 +201,64 @@ class TrajectoryDataset(MTDataset):
         
         root = next(token for token in doc if token.head == token)
         traverse(root, 0)
+       
+        ### this does 2 step generation from par -> pos -> tok 
+        # m = {}
+        # input_ids = [[0, get_id(root.pos_), 1]]
         
-        m = {}
-        input_ids = [[0, get_id(root.pos_), 1]]
+        # op_ids = []
+        # tok_ids = []
+        # idx_ids = []
         
+        # last_len = 3
+        # for i, seq in enumerate(traj[1:]):
+        #     cur_edits = [(CPY, -1, 0)]
+            
+        #     if i % 2 == 0:
+        #         k = 1
+        #         for t in seq:
+        #             if t == '_': continue
+        #             if t[1] in m: cur_edits.append((CPY, -1, k))
+        #             else: cur_edits.append((SUB, get_id(t[0]), k))
+        #             m[t[1]] = k
+        #             k += 1
+                    
+        #     else:
+        #         k = 1
+        #         for t in seq:
+        #             if t == '_': continue
+        #             if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
+        #             # NOTE -- let's call this INS for now...
+        #             else: cur_edits.append((INS, get_id(t[0]), m[t[2]]))
+            
+        #     input_ids.append([get_id('BOS')] + [get_id(t[0]) for t in seq if t != '_'] + [get_id('EOS')])
+        #     cur_edits.append((CPY, -1, last_len - 1))
+        #     last_len = len(cur_edits)
+            
+        #     ops, toks, idxs = zip(*cur_edits)
+        #     op_ids.append(ops)
+        #     tok_ids.append(toks)
+        #     idx_ids.append(idxs)
+        
+        
+        ### let's do 1 step generation from par -> tok
+        m = {root.i: 1}
+        input_ids = [[0, get_id(root.text), 1]]
+
         op_ids = []
         tok_ids = []
         idx_ids = []
-        
-        
-        '''
-        let's lose the pos placeholder idea
-        '''
-        
+    
         last_len = 3
-        for i, seq in enumerate(traj[1:]):
+        for seq in traj[3::2]:
             cur_edits = [(CPY, -1, 0)]
-            
-            if i % 2 == 0:
-                k = 1
-                for t in seq:
-                    if t == '_': continue
-                    if t[1] in m: cur_edits.append((CPY, -1, k))
-                    else: cur_edits.append((SUB, get_id(t[0]), k))
-                    m[t[1]] = k
-                    k += 1
-                    
-            else:
-                k = 1
-                for t in seq:
-                    if t == '_': continue
-                    if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
-                    # NOTE -- let's call this INS for now...
-                    else: cur_edits.append((INS, get_id(t[0]), m[t[2]]))
+            k = 1
+            for t in seq:
+                if t == '_': continue
+                if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
+                else: cur_edits.append((SUB, get_id(t[0]), m[t[2]]))
+                m[t[1]] = k
+                k += 1
             
             input_ids.append([get_id('BOS')] + [get_id(t[0]) for t in seq if t != '_'] + [get_id('EOS')])
             cur_edits.append((CPY, -1, last_len - 1))
@@ -753,12 +778,16 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            *_, generated = model.rollout({
+            traj = model.rollout({
                 'src_ids': batch['src_ids'].to(device),
                 'input_ids': batch['input_ids'].to(device),
                 'tgt_ids': batch['tgt_ids'].to(device),
                 'root_ids': batch['root_ids'].to(device),
                 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+            *_, generated = traj
+            
+            if i == 0:
+                logger.info(f'\nexample traj:\n{'\n'.join(tokenizer.decode(step[0]) for step in traj)}')
         
         for hyp, ref in zip(generated, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)

@@ -49,9 +49,17 @@ def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
    
-# should operate on a batch 
+# should operate on a batch
 # don't bother stacking along batch dim, just map along each pair of examples
+
 def get_edits():
+    
+    # PROBLEM -- mismatch between bert and spacy tokenizers
+    # can do a little dp here to align things
+    
+    def aux(input_ids, tgt_ids):
+        pass
+    
     pass
 
 def train(config):

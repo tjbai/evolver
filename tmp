@@ -1,0 +1,10 @@
+problem with dependency parse is mismatch between spacy tokenizers and standard bpe tokenizers
+
+this interferes with plan to do parse tree pretraining -> dagger with ar supervision
+
+we need a way to interfere the correct alignment between input_ids and tgt_ids provided by ar model
+
+the goto method involves bert tokenization and computing a maximum weight alignment in the bipartite seq graph
+
+
+

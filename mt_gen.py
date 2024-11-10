@@ -62,4 +62,4 @@ def main():
     print(f"Completions have been saved to {args.output}")
 
 if __name__ == "__main__":
-    main()
+    mTJain()

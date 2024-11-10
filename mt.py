@@ -5,6 +5,7 @@ import random
 import logging
 import argparse
 from datetime import datetime
+from collections import defaultdict
 
 import spacy
 import wandb
@@ -35,6 +36,9 @@ logger = logging.getLogger(__name__)
 def log_to_wandb(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: logger.info(f'step {step}: {data}')
+    
+def pad(seqs, padding_value):
+    return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=padding_value)
 
 class SpacyTokenizer:
     
@@ -68,7 +72,6 @@ class SpacyTokenizer:
         if add_special_tokens: tokens = [self.bos_token_id] + tokens + [self.eos_token_id]
         return tokens
    
-    # i hate this 
     def decode(self, tok_ids, skip_special_tokens=True):
         tokens = []
         for id in tok_ids.tolist() if isinstance(tok_ids, torch.Tensor) else tok_ids:
@@ -101,9 +104,9 @@ class MarianTokenizer:
     def __init__(self):
         self.tokenizer = TransformersMarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
         self.vocab_size = self.tokenizer.vocab_size + 1
-        self.pad_token_id = 58100
-        self.eos_token_id = 0
-        self.unk_token_id = 1
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
+        self.unk_token_id = self.tokenizer.unk_token_id
         self.bos_token_id = self.tokenizer.vocab_size
 
     def get_id(self, t):
@@ -116,160 +119,182 @@ class MarianTokenizer:
     def decode(self, tok_ids, skip_special_tokens=True, **_):
         if skip_special_tokens: return self.tokenizer.decode(tok_ids[1:], skip_special_tokens=True)
         else: return '<s>' + self.tokenizer.decode(tok_ids[1:], skip_special_tokens=False)
-    
-class MTDataset(Dataset):
+        
+class Parser:
 
-    def __init__(
-        self,
-        split='train',
-        max_len=256,
-        buffer_size=1000,
-        tokenizer=MarianTokenizer(),
-        truncate=None
-    ):
+    def __init__(self):
+        self.en_nlp = spacy.load('en_core_web_sm')
+        self.de_nlp = spacy.load('de_core_news_sm')
+        self.marian = MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
+    
+    def get_spans(self, text, tokens):
+        spans = []
+        i = 0
+        for token in tokens:
+            while i < len(text) and text[i].isspace(): i += 1
+            if i < len(text):
+                s = i
+                i = text.find(token, i) + len(token)
+                spans.append((s, i))
+        
+        assert len(spans) == len(tokens), f'number of spans does not match number of tokens for: {text}'
+        return spans
+
+    def get_alignment(self, text, spacy_tokens, marian_tokens, spacy_spans=None, marian_spans=None):
+        if spacy_spans is None: spacy_spans = self.get_spans(spacy_tokens) 
+        if marian_tokens is None: marian_spans = self.get_spans(marian_tokens) 
+        
+        alignment = {} # map marian_tokens[i] to spacy_tokens[j]
+        best_overlap = defaultdict(int) # track max overlap
+        
+        # just bruteforce check (who needs DP?)
+        for i, marian_span in enumerate(marian_spans):
+            for j, spacy_span in enumerate(spacy_spans):
+                overlap = max(0, min(spacy_span[1], marian_span[1]) - max(spacy_span[0], marian_span[0]))
+                if overlap > 0 and overlap > best_overlap[i]:
+                    alignment[i] = j
+                    best_overlap[i] = overlap
+                    
+        for i, tok in enumerate(marian_tokens):
+            if tok == '': alignment[i] = alignment[i+1] # word break
+            if tok == '<unk>': alignment[i] = 1 + alignment[i-1] # unk
+        
+        assert len(alignment) == len(marian_tokens), f'did not find a complete alignment for: {text}'
+        return alignment
+
+    def get_spacy_tokens(self, text, lang):
+        return [token.text for token in (self.en_nlp if lang == 'en' else self.de_nlp)(text)]
+
+    def get_marian_tokens(self, text):
+        return [self.marian.decode(id) for id in self.marian(text)['input_ids'][:-1]]
+    
+    def align(self, text, lang):
+        spacy_tokens = self.get_spacy_tokens(text, lang)
+        spacy_spans = self.get_spans(text, spacy_tokens)
+        normalized_marian_tokens = self.get_marian_tokens(text)
+        marian_spans = self.get_spans(text, normalized_marian_tokens)
+
+        raw_marian_tokens = self.marian.tokenize(text)
+        doc = (self.en_nlp if lang == 'en' else self.de_nlp)(text)
+        alignment = self.get_alignment(text, spacy_tokens, normalized_marian_tokens, spacy_spans, marian_spans)
+    
+        # reverse map spacy to marian tokens
+        reverse = defaultdict(list)
+        for k, v in alignment.items(): reverse[v].append(k)
+
+        # get original root idx
+        root_i = next(i for i, tok in enumerate(doc) if tok.head == tok)
+
+        seq = []
+        for i, text in enumerate(raw_marian_tokens):
+            spacy_tok = doc[alignment[i]]
+            seq.append({'text': text, 'pos': spacy_tok.pos_, 'i': i, 'is_head': alignment[i] == root_i})
+        
+        for i, _ in enumerate(seq):
+            spacy_children = doc[alignment[i]].children
+            seq[i]['children'] = []
+            for child in spacy_children:
+                seq[i]['children'].extend(seq[i] for i in reverse[child.i])
+            
+            ### heuristic for lineage 
+            # spacy_parent = doc[alignment[i]].head.i
+            # inferred_parent = reverse[spacy_parent][0]
+            seq[i]['par'] = reverse[doc[alignment[i]].head.i][0]
+            
+        return seq
+    
+class WMT(Dataset):
+
+    def __init__(self, split='train', max_len=256, tokenizer=SpacyTokenizer(), truncate=None):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
         self.tokenizer = tokenizer
-        self.buffer = []
-        self.buffer_index = 0
-        self.buffer_size = buffer_size
 
         if truncate is not None:
-            self.buffer_size = min(buffer_size, truncate)
             self.dataset = self.dataset.select(range(truncate))
             logger.info(f'truncated to: {self.dataset["translation"]}')
 
     def __len__(self):
-        return int(1e12)
+        return len(self.dataset)
 
-    def __getitem__(self, _):
-        if self.buffer_index >= len(self.buffer): self.refill_buffer()
-        item = self.buffer[self.buffer_index]
-        self.buffer_index += 1
-
+    def __getitem__(self, idx):
+        item = self.dataset[idx]['translation']
         src_ids = self.tokenizer.encode(item['de'], lang='de')[:self.max_len]
         tgt_ids = self.tokenizer.encode(item['en'], lang='en')[:self.max_len]
-
         return {'src_ids': src_ids, 'tgt_ids': tgt_ids}
-    
-    def refill_buffer(self):
-        start_idx = random.randint(0, len(self.dataset) - self.buffer_size)
-        self.buffer = self.dataset[start_idx:start_idx + self.buffer_size]['translation']
-        random.shuffle(self.buffer)
-        self.buffer_index = 0
         
     def collate_fn(self, batch):
         src_ids = [item['src_ids'] for item in batch]
         tgt_ids = [item['tgt_ids'] for item in batch]
-        
-        src_ids_padded = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(ids) for ids in src_ids],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
-        )
-        
-        tgt_ids_padded = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(ids) for ids in tgt_ids],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
-        )
-        
-        return {'src_ids': src_ids_padded, 'tgt_ids': tgt_ids_padded}
+        src_ids = pad([torch.tensor(ids) for ids in src_ids], self.tokenizer.pad_token_id)
+        tgt_ids = pad([torch.tensor(ids) for ids in tgt_ids], self.tokenizer.pad_token_id)
+        return {'src_ids': src_ids, 'tgt_ids': tgt_ids}
     
-class TrajectoryDataset(MTDataset):
+class WMTForEvolver(WMT):
     
-    def depth(self, doc):
-        root = [tok for tok in doc if tok.head == tok] [0]
+    def _get_depth(self, doc):
+        root = next(tok for tok in doc if tok['is_head'])
         def dfs(node):
             r = 1
-            for child in node.children: r = max(r, 1 + dfs(child))
+            for child in node['children']: r = max(r, 1 + dfs(child))
             return r
         return dfs(root)
     
-    def gen(self, doc):
-        get_id = self.tokenizer.get_id
-        INS, CPY, SUB = 0, 1, 2 
-       
-        traj = [['_' for _ in range(len(doc))] for _ in range(2*self.depth(doc))]
-        
-        def traverse(token, depth):
+    # uses fake spacy api
+    def _get_input_traj(self, doc):
+        def aux(token, depth):
             for i in range(depth, len(traj)):
-                traj[i][token.i] = (token.text if (i > depth+1) else token.pos_, token.i, token.head.i)
+                traj[i][token['i']] = (token['text'] if (i > depth+1) else token['pos'], token['i'], token['par'])
 
-            traj[depth+1][token.i] = (token.text, token.i, token.head.i)
-            for child in token.children: traverse(child, depth+2)
+            traj[depth+1][token['i']] = (token['text'], token['i'], token['par'])
+            for child in token['children']: aux(child, depth+2)
         
-        root = next(token for token in doc if token.head == token)
-        traverse(root, 0)
-       
-        ### this does 2 step generation from par -> pos -> tok 
-        # m = {}
-        # input_ids = [[0, get_id(root.pos_), 1]]
-        
-        # op_ids = []
-        # tok_ids = []
-        # idx_ids = []
-        
-        # last_len = 3
-        # for i, seq in enumerate(traj[1:]):
-        #     cur_edits = [(CPY, -1, 0)]
-            
-        #     if i % 2 == 0:
-        #         k = 1
-        #         for t in seq:
-        #             if t == '_': continue
-        #             if t[1] in m: cur_edits.append((CPY, -1, k))
-        #             else: cur_edits.append((SUB, get_id(t[0]), k))
-        #             m[t[1]] = k
-        #             k += 1
-                    
-        #     else:
-        #         k = 1
-        #         for t in seq:
-        #             if t == '_': continue
-        #             if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
-        #             # NOTE -- let's call this INS for now...
-        #             else: cur_edits.append((INS, get_id(t[0]), m[t[2]]))
-            
-        #     input_ids.append([get_id('BOS')] + [get_id(t[0]) for t in seq if t != '_'] + [get_id('EOS')])
-        #     cur_edits.append((CPY, -1, last_len - 1))
-        #     last_len = len(cur_edits)
-            
-        #     ops, toks, idxs = zip(*cur_edits)
-        #     op_ids.append(ops)
-        #     tok_ids.append(toks)
-        #     idx_ids.append(idxs)
-        
-        
-        ### let's do 1 step generation from par -> tok
-        m = {root.i: 1}
-        input_ids = [[0, get_id(root.text), 1]]
-
-        op_ids = []
-        tok_ids = []
-        idx_ids = []
+        traj = [['_' for _ in range(len(doc))] for _ in range(2*self._get_depth(doc))]
+        for tok in doc:
+            if tok['is_head']: aux(tok, 0)
+        return traj 
+   
+    def _get_short_input_traj(self, doc):
+        return self._get_input_traj(doc)[1::2]
     
-        last_len = 3
-        for seq in traj[3::2]:
-            cur_edits = [(CPY, -1, 0)]
+    def _get_output_traj(self, doc):
+        get_id = self.tokenizer.get_id
+        INS, CPY, SUB = 0, 1, 2
+        
+        # NOTE -- this the reduced version for scaling efficiency
+        input_traj = self._get_short_input_traj(doc)
+
+        # TODO -- fix root stuff
+        root = next(tok for tok in doc if tok['head'] == tok)
+        
+        output_traj = []
+        output_traj.append([(INS, self.tokenizer.bos_token_id, -1), (INS, self.tokenizer.eos_token_id, -1)])
+        output_traj.append([(INS, self.tokenizer.bos_token_id, -1), (INS, get_id(root.text), -1), (INS, self.tokenizer.eos_token_id, -1)])
+
+        par_idx = {root.i: 1}
+        for seq in input_traj[1:]:
             k = 1
+            new_par_idx = {}
+            cur = [(INS, self.tokenizer.bos_token_id, -1)]
+            
             for t in seq:
-                if t == '_': continue
-                if t[1] in m: cur_edits.append((CPY, -1, m[t[1]]))
-                else: cur_edits.append((SUB, get_id(t[0]), m[t[2]]))
-                m[t[1]] = k
+                if t == '_':
+                    continue
+                elif t[1] in par_idx:
+                    assert par_idx[t[1]] < len(output_traj[-1]), f'{par_idx[t[1]]} is too large for prev seq size of {len(output_traj[-1])}'
+                    cur.append((CPY, -1, par_idx[t[1]]))
+                else:
+                    assert par_idx[t[2]] < len(output_traj[-1]), f'{par_idx[t[2]]} is too large for prev seq size of {len(output_traj[-1])}'
+                    cur.append((SUB, get_id(t[0]), par_idx[t[2]]))
+
+                new_par_idx[t[1]] = k
                 k += 1
             
-            input_ids.append([get_id('BOS')] + [get_id(t[0]) for t in seq if t != '_'] + [get_id('EOS')])
-            cur_edits.append((CPY, -1, last_len - 1))
-            last_len = len(cur_edits)
-            
-            ops, toks, idxs = zip(*cur_edits)
-            op_ids.append(ops)
-            tok_ids.append(toks)
-            idx_ids.append(idxs)
+            par_idx = new_par_idx 
+            cur.append((INS, self.tokenizer.eos_token_id, -1))
+            output_traj.append(cur)
         
-        return input_ids, (op_ids, tok_ids, idx_ids)
+        return output_traj
     
     def __getitem__(self, _):
         if self.buffer_index >= len(self.buffer): self.refill_buffer()
@@ -605,26 +630,7 @@ class Transformer(nn.Module):
         tgt_ids = tgt_ids[torch.arange(B), best_beam]
         
         self.decoder.set_parallel()
-        return tgt_ids 
-        
-        # B = src_ids.shape[0]
-        # device = src_ids.device
-        # self.decoder.set_causal()
-        
-        # tgt_ids = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
-        # finished = torch.zeros(B, dtype=torch.bool, device=device)
-        
-        # cache = None
-        # for _ in range(self.max_len):
-        #     logits, cache = self.forward({'src_ids': src_ids.to(device), 'tgt_ids': tgt_ids.to(device)}, cache=cache)
-        #     next_tok_logits = logits[:, -1, :] / temperature
-        #     next_tok = torch.multinomial(F.softmax(next_tok_logits, dim=-1), num_samples=1)
-        #     tgt_ids = torch.cat([tgt_ids, next_tok], dim=-1)
-        #     finished |= (next_tok.squeeze(-1) == self.eos_token_id)
-        #     if finished.all(): break
-        
-        # self.decoder.set_parallel()
-        # return tgt_ids
+        return tgt_ids
         
 class Teacher(nn.Module):
     
@@ -786,8 +792,8 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
                 'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
             *_, generated = traj
             
-            if i == 0:
-                logger.info(f'\nexample traj:\n{'\n'.join(tokenizer.decode(step[0]) for step in traj)}')
+            # if i == 0:
+            #     logger.info(f'\nexample traj:\n{'\n'.join(tokenizer.decode(step[0]) for step in traj)}')
         
         for hyp, ref in zip(generated, batch['tgt_ids']):
             hyp_text = tokenizer.decode(hyp)
@@ -840,7 +846,7 @@ def train(config):
     device = torch.device(config['device'])
     
     tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
-    dataset = MTDataset if config['model_type'] == 'decoder_only' else TrajectoryDataset
+    dataset = WMT if config['model_type'] == 'decoder_only' else WMTForEvolver
     train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
     eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
     logger.info(f'loaded {dataset} datasets and {type(tokenizer)} tokenizer')
@@ -852,9 +858,10 @@ def train(config):
     optim = AdamW(model.parameters(), lr=config['lr'])
     start_step = load_checkpoint(model, optim, config)
     
-    logger.info('eval sanity check')
-    evaluate(model, eval_loader, device, 1, tokenizer)
-    logger.info('sanity check passed')
+    if not config['skip']:
+        logger.info('eval sanity check')
+        evaluate(model, eval_loader, device, 1, tokenizer)
+        logger.info('sanity check passed')
     
     model.train()
     for step, batch in tqdm(
@@ -895,6 +902,7 @@ def parse_args():
     parser.add_argument('--config')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--local', action='store_true')
+    parser.add_argument('--skip', action='store_true')
     return parser.parse_args()
 
 def main():
@@ -902,6 +910,7 @@ def main():
     config = load_config(args.config)
     config['device'] = args.device
     config['local'] = args.local
+    config['skip'] = args.skip
     config['name'] = f"mt_{config['model_type']}_{config['d_model']}d_{config.get('encoder_layers', 0)}enc_{config['decoder_layers']}dec-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if not config['local']: wandb.init(project='mt-evolver', name=config['name'], config=config, resume='allow')
     train(config)

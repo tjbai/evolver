@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import yaml
 import random
 import logging
 import argparse
@@ -13,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer as T
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, RandomSampler
 from torch.optim import AdamW
 from sacrebleu import corpus_bleu
 from tqdm import tqdm
@@ -37,8 +38,8 @@ def log_to_wandb(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
     else: logger.info(f'step {step}: {data}')
     
-def pad(seqs, padding_value):
-    return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=padding_value)
+def pad(seqs, padding_value, max_len=int(1e10)):
+    return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=padding_value)[:, :max_len]
 
 class SpacyTokenizer:
     
@@ -123,9 +124,8 @@ class MarianTokenizer:
 class Parser:
 
     def __init__(self):
-        self.en_nlp = spacy.load('en_core_web_sm')
-        self.de_nlp = spacy.load('de_core_news_sm')
-        self.marian = MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
+        self.nlp = spacy.load('en_core_web_sm')
+        self.marian = TransformersMarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
     
     def get_spans(self, text, tokens):
         spans = []
@@ -162,20 +162,20 @@ class Parser:
         assert len(alignment) == len(marian_tokens), f'did not find a complete alignment for: {text}'
         return alignment
 
-    def get_spacy_tokens(self, text, lang):
-        return [token.text for token in (self.en_nlp if lang == 'en' else self.de_nlp)(text)]
+    def get_spacy_tokens(self, text):
+        return [token.text for token in self.nlp(text)]
 
     def get_marian_tokens(self, text):
         return [self.marian.decode(id) for id in self.marian(text)['input_ids'][:-1]]
     
-    def align(self, text, lang):
-        spacy_tokens = self.get_spacy_tokens(text, lang)
+    def parse(self, text):
+        spacy_tokens = self.get_spacy_tokens(text)
         spacy_spans = self.get_spans(text, spacy_tokens)
         normalized_marian_tokens = self.get_marian_tokens(text)
         marian_spans = self.get_spans(text, normalized_marian_tokens)
 
         raw_marian_tokens = self.marian.tokenize(text)
-        doc = (self.en_nlp if lang == 'en' else self.de_nlp)(text)
+        doc = self.nlp(text)
         alignment = self.get_alignment(text, spacy_tokens, normalized_marian_tokens, spacy_spans, marian_spans)
     
         # reverse map spacy to marian tokens
@@ -196,7 +196,7 @@ class Parser:
             for child in spacy_children:
                 seq[i]['children'].extend(seq[i] for i in reverse[child.i])
             
-            ### heuristic for lineage 
+            ### heuristic for lineage
             # spacy_parent = doc[alignment[i]].head.i
             # inferred_parent = reverse[spacy_parent][0]
             seq[i]['par'] = reverse[doc[alignment[i]].head.i][0]
@@ -205,14 +205,11 @@ class Parser:
     
 class WMT(Dataset):
 
-    def __init__(self, split='train', max_len=256, tokenizer=SpacyTokenizer(), truncate=None):
+    def __init__(self, split='train', max_len=256, tokenizer=MarianTokenizer(), truncate=None):
         self.dataset = load_dataset('wmt14', 'de-en', split=split)
         self.max_len = max_len
         self.tokenizer = tokenizer
-
-        if truncate is not None:
-            self.dataset = self.dataset.select(range(truncate))
-            logger.info(f'truncated to: {self.dataset["translation"]}')
+        if truncate is not None: self.dataset = self.dataset.select(range(truncate))
 
     def __len__(self):
         return len(self.dataset)
@@ -231,6 +228,10 @@ class WMT(Dataset):
         return {'src_ids': src_ids, 'tgt_ids': tgt_ids}
     
 class WMTForEvolver(WMT):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.parser = Parser()
     
     def _get_depth(self, doc):
         root = next(tok for tok in doc if tok['is_head'])
@@ -264,112 +265,74 @@ class WMTForEvolver(WMT):
         # NOTE -- this the reduced version for scaling efficiency
         input_traj = self._get_short_input_traj(doc)
 
-        # TODO -- fix root stuff
-        root = next(tok for tok in doc if tok['head'] == tok)
-        
+        # prefill empty string x0 
         output_traj = []
+        traj_ids = []
         output_traj.append([(INS, self.tokenizer.bos_token_id, -1), (INS, self.tokenizer.eos_token_id, -1)])
-        output_traj.append([(INS, self.tokenizer.bos_token_id, -1), (INS, get_id(root.text), -1), (INS, self.tokenizer.eos_token_id, -1)])
+        traj_ids.append([self.tokenizer.bos_token_id, self.tokenizer.eos_token_id])
+       
+        # prefill root sequence 
+        par_idx = {} 
+        output_traj.append([(INS, self.tokenizer.bos_token_id, -1)])
+        traj_ids.append([(self.tokenizer.bos_token_id)])
+        k = 1
+        for tok in doc:
+            if not tok['is_head']: continue
+            output_traj[-1].append((INS, get_id(tok['text']), -1))
+            par_idx[tok['i']] = k
+            k += 1
+        output_traj[-1].append((INS, self.tokenizer.eos_token_id, -1))
+        traj_ids[-1].append(self.tokenizer.eos_token_id)
 
-        par_idx = {root.i: 1}
+        # fill in subsequent steps
         for seq in input_traj[1:]:
             k = 1
             new_par_idx = {}
-            cur = [(INS, self.tokenizer.bos_token_id, -1)]
+            cur_edits = [(INS, self.tokenizer.bos_token_id, -1)]
+            cur_ids = [self.tokenizer.bos_token_id]
             
             for t in seq:
                 if t == '_':
                     continue
                 elif t[1] in par_idx:
                     assert par_idx[t[1]] < len(output_traj[-1]), f'{par_idx[t[1]]} is too large for prev seq size of {len(output_traj[-1])}'
-                    cur.append((CPY, -1, par_idx[t[1]]))
+                    cur_edits.append((CPY, -1, par_idx[t[1]]))
                 else:
                     assert par_idx[t[2]] < len(output_traj[-1]), f'{par_idx[t[2]]} is too large for prev seq size of {len(output_traj[-1])}'
-                    cur.append((SUB, get_id(t[0]), par_idx[t[2]]))
-
+                    cur_edits.append((SUB, get_id(t[0]), par_idx[t[2]]))
+                cur_ids.append(get_id(t[0]))
                 new_par_idx[t[1]] = k
                 k += 1
             
             par_idx = new_par_idx 
-            cur.append((INS, self.tokenizer.eos_token_id, -1))
-            output_traj.append(cur)
+            cur_edits.append((INS, self.tokenizer.eos_token_id, -1))
+            cur_ids.append(self.tokenizer.eos_token_id)
+            output_traj.append(cur_edits)
+            traj_ids.append(cur_ids)
         
-        return output_traj
-    
-    def __getitem__(self, _):
-        if self.buffer_index >= len(self.buffer): self.refill_buffer()
-        item = self.buffer[self.buffer_index]
-        self.buffer_index += 1
-        
-        src_ids = self.tokenizer.encode(item['de'], lang='de')
-        traj_ids, edit_ids = self.gen(self.tokenizer.en_nlp(item['en']))
-        
-        t = random.randint(0, len(traj_ids)-2)
+        return output_traj, traj_ids
 
-        return {
-            'src_ids': src_ids,
-            'root_ids': traj_ids[0],
-            'input_ids': traj_ids[t],
-            'tgt_ids': traj_ids[t+1],
-            'edit_ids': tuple(map(lambda x: x[t], edit_ids)),
-            'traj_ids':traj_ids 
-        }
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        src_ids = self.tokenizer.encode(item['translation']['de'])
         
-    def collate_fn_reduced(self, batch):
-        src_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['src_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
+        parsed = self.parser.parse(item['translation']['en'])
+        output_traj, traj_ids = self._get_output_traj(parsed)
         
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['input_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-        
-        return {'src_ids': src_ids, 'input_ids': input_ids}
+        t = random.randint(0, len(output_traj)-2)
+        target_seq = output_traj[t+1]
+        edit_ids = ([x[0] for x in target_seq], [x[1] for x in target_seq], [x[2] for x in target_seq])
+
+        return {'src_ids': src_ids, 'input_ids': traj_ids[t], 'tgt_ids': traj_ids[t+1], 'edit_ids': edit_ids}
     
     def collate_fn(self, batch):
-        src_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['src_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-        
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['input_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-       
-        root_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['root_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-        
-        tgt_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['tgt_ids']) for item in batch],
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)[:, :self.max_len]
-
-        op_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['edit_ids'][0]) for item in batch],
-            batch_first=True,
-            padding_value=-1)[:, :self.max_len]
-       
-        tok_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['edit_ids'][1]) for item in batch],
-            batch_first=True,
-            padding_value=-1)[:, :self.max_len]
-        
-        idx_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(item['edit_ids'][2]) for item in batch],
-            batch_first=True,
-            padding_value=-1)[:, :self.max_len]
-        
-        return {
-            'src_ids': src_ids,
-            'root_ids': root_ids,
-            'input_ids': input_ids,
-            'tgt_ids': tgt_ids,
-            'edit_ids': (op_ids, tok_ids, idx_ids)}
+        src_ids = pad([torch.tensor(item['src_ids']) for item in batch], self.tokenizer.pad_token_id, self.max_len)
+        input_ids = pad([torch.tensor(item['input_ids']) for item in batch], self.tokenizer.pad_token_id, self.max_len)
+        tgt_ids = pad([torch.tensor(item['tgt_ids']) for item in batch], self.tokenizer.pad_token_id, self.max_len)
+        op_ids = pad([torch.tensor(item['edit_ids'][0]) for item in batch], -1, self.max_len)
+        tok_ids = pad([torch.tensor(item['edit_ids'][1]) for item in batch], -1, self.max_len)
+        idx_ids = pad([torch.tensor(item['edit_ids'][2]) for item in batch], -1, self.max_len)
+        return {'src_ids': src_ids, 'input_ids': input_ids, 'tgt_ids': tgt_ids, 'edit_ids': (op_ids, tok_ids, idx_ids)}
 
 class Evolver(nn.Module):
 
@@ -456,7 +419,8 @@ class Evolver(nn.Module):
             F.nll_loss(tok_probs[:, :-1].transpose(1, 2), batch['edit_ids'][1][:, 1:], ignore_index=-1, reduction='mean'),
             F.nll_loss(idx_probs[:, :-1].transpose(1, 2), batch['edit_ids'][2][:, 1:], ignore_index=-1, reduction='mean')
         )
-        
+    
+    @classmethod 
     def apply_edits(self, input_ids, edit_ids):
         op_ids, tok_ids, idx_ids = edit_ids
         B = input_ids.shape[0]
@@ -515,14 +479,16 @@ class Evolver(nn.Module):
             
         return tgt_ids
     
+    # NOTE -- rollout should start from empty string
     def rollout(self, batch, T=10, temp=1, verbose=False):
-        self.decoder.set_causal()
-        traj = [batch['root_ids']]
-        for _ in tqdm(range(T), desc='rolling out', disable=not verbose):
-            batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
-            traj.append(self._generate(batch, temp=temp))
-        self.decoder.set_parallel()
-        return traj
+        pass
+        # self.decoder.set_causal()
+        # traj = []
+        # for _ in tqdm(range(T), desc='rolling out', disable=not verbose):
+        #     batch = {'src_ids': batch['src_ids'], 'input_ids': traj[-1]}
+        #     traj.append(self._generate(batch, temp=temp))
+        # self.decoder.set_parallel()
+        # return traj
     
 class Transformer(nn.Module):
     
@@ -784,27 +750,28 @@ def evaluate(model, eval_loader, device, num_eval_steps, tokenizer):
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-            traj = model.rollout({
-                'src_ids': batch['src_ids'].to(device),
-                'input_ids': batch['input_ids'].to(device),
-                'tgt_ids': batch['tgt_ids'].to(device),
-                'root_ids': batch['root_ids'].to(device),
-                'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
-            *_, generated = traj
-            
-            # if i == 0:
-            #     logger.info(f'\nexample traj:\n{'\n'.join(tokenizer.decode(step[0]) for step in traj)}')
         
-        for hyp, ref in zip(generated, batch['tgt_ids']):
-            hyp_text = tokenizer.decode(hyp)
-            ref_text = tokenizer.decode(ref)
-            hyps.append(hyp_text)
-            refs.append(ref_text)
+        # TODO -- bring back sampling to test
+        #     traj = model.rollout({
+        #         'src_ids': batch['src_ids'].to(device),
+        #         'input_ids': batch['input_ids'].to(device),
+        #         'tgt_ids': batch['tgt_ids'].to(device),
+        #         'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
+        #     *_, generated = traj
+        
+        # for hyp, ref in zip(generated, batch['tgt_ids']):
+        #     hyp_text = tokenizer.decode(hyp)
+        #     ref_text = tokenizer.decode(ref)
+        #     hyps.append(hyp_text)
+        #     refs.append(ref_text)
             
-    logger.info(f'sample hyp: {hyps[0]}')
-    logger.info(f'sample ref: {refs[0]}')
+    # logger.info(f'sample hyp: {hyps[0]}')
+    # logger.info(f'sample ref: {refs[0]}')
+    
+    # score = corpus_bleu(hyps, [refs]).score
+    score = 0
 
-    return tot_loss / num_eval_steps, corpus_bleu(hyps, [refs]).score
+    return tot_loss / num_eval_steps, score
     
 def init_model(config, tokenizer):
     params = {
@@ -825,10 +792,8 @@ def init_model(config, tokenizer):
     
     if config['model_type'] == 'decoder_only':
         return Transformer(**params).to(config['device'])
-        
     elif config['model_type'] == 'evolver':
         return Evolver(**params).to(config['device'])
-        
     else:
         return Teacher(**params).to(config['device'])
     
@@ -845,18 +810,21 @@ def load_checkpoint(model, optimizer, config):
 def train(config):
     device = torch.device(config['device'])
     
-    tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
+    # tokenizer = MarianTokenizer() if config['model_type'] == 'decoder_only' else SpacyTokenizer()
+    tokenizer = MarianTokenizer()
+    
     dataset = WMT if config['model_type'] == 'decoder_only' else WMTForEvolver
-    train_dataset = dataset(split='train', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
-    eval_dataset = dataset(split='validation', max_len=config['max_len'], buffer_size=config['buffer_size'], tokenizer=tokenizer, truncate=config.get('truncate'))
+    train_dataset = dataset(split='train', max_len=config['max_len'], tokenizer=tokenizer, truncate=config.get('truncate'))
+    eval_dataset = dataset(split='validation', max_len=config['max_len'], tokenizer=tokenizer, truncate=config.get('truncate'))
     logger.info(f'loaded {dataset} datasets and {type(tokenizer)} tokenizer')
     
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=train_dataset.collate_fn, num_workers=config['num_workers'])
-    eval_loader = DataLoader(eval_dataset, batch_size=config['batch_size'], collate_fn=eval_dataset.collate_fn, num_workers=config['num_workers'])
+    kwargs = {'batch_size': config['batch_size'], 'collate_fn': train_dataset.collate_fn, 'num_workers': config['num_workers']}
+    train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), **kwargs)
+    eval_loader = DataLoader(eval_dataset, **kwargs)
    
     model = init_model(config, tokenizer)
     optim = AdamW(model.parameters(), lr=config['lr'])
-    start_step = load_checkpoint(model, optim, config)
+    step = load_checkpoint(model, optim, config)
     
     if not config['skip']:
         logger.info('eval sanity check')
@@ -864,30 +832,29 @@ def train(config):
         logger.info('sanity check passed')
     
     model.train()
-    for step, batch in tqdm(
-        enumerate(train_loader, start=start_step),
-        total=config['train_steps'],
-        disable=config['local']
-    ):
-        if step >= config['train_steps']: break
-        
-        loss = train_step(model, batch, device, step=step)
-        loss.backward()
+    for _ in range(config['train_epochs']):
+        for batch in tqdm(train_loader):
+            if step >= config['train_steps']: break
+            
+            loss = train_step(model, batch, device, step=step)
+            loss.backward()
 
-        if (step + 1) % config['grad_accum_steps'] == 0:
-            optim.step()
-            optim.zero_grad()
+            if (step + 1) % config['grad_accum_steps'] == 0:
+                optim.step()
+                optim.zero_grad()
 
-        if (step + 1) % config['log_every'] == 0:
-            log_to_wandb({'train/loss': loss.item()}, step=step)
+            if (step + 1) % config['log_every'] == 0:
+                log_to_wandb({'train/loss': loss.item()}, step=step)
 
-        if (step + 1) % config['eval_every'] == 0:
-            eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
-            log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
-            model.train()
+            if (step + 1) % config['eval_every'] == 0:
+                eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
+                log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
+                model.train()
 
-        if (step + 1) % config['save_every'] == 0:
-            save_checkpoint(model, optim, step, config)
+            if (step + 1) % config['save_every'] == 0:
+                save_checkpoint(model, optim, step, config)
+            
+            step += 1
 
     eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'], tokenizer)
     log_to_wandb({'eval/loss': eval_loss, 'eval/bleu': bleu_score}, step=step)
@@ -895,6 +862,8 @@ def train(config):
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
+        if config_path[-3:] == 'yml':
+            return yaml.safe_load(f)
         return json.load(f)
 
 def parse_args():

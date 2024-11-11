@@ -1,0 +1,27 @@
+# model params
+model_type: evolver
+d_model: 512
+dim_feedforward: 2048
+nhead: 8
+dropout: 0.1
+layer_norm_eps: 0.00001
+encoder_layers: 6
+decoder_layers: 6
+max_len: 128
+
+# data params
+batch_size: 16
+num_workers: 4
+
+# train params
+train_epochs: 3
+lr: 0.0003
+train_steps: !!float 1.0e10
+grad_accum_steps: 16
+
+# logging, eval
+log_every: 16
+eval_every: 25000
+num_eval_steps: 20
+save_every: 10000
+checkpoint_dir: /scratch4/jeisner1/checkpoints

@@ -22,14 +22,8 @@ from datasets import load_dataset
 from transformers import BertTokenizer as TransformersBertTokenizer
 from transformers import MarianTokenizer as TransformersMarianTokenizer
 
-from embed import SinusoidalEmbedding
-from trans import (
-    TransformerEncoderLayer,
-    TransformerEncoder,
-    CausalTransformerDecoderLayer,
-    CausalTransformerDecoder,
-    MultiheadPointer
-)
+from evolver.embed import SinusoidalEmbedding
+from evolver.trans import TransformerEncoderLayer, TransformerEncoder, CausalTransformerDecoderLayer, CausalTransformerDecoder, MultiheadPointer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

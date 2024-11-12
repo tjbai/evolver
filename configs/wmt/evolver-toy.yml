@@ -7,7 +7,10 @@ dropout: 0.0
 layer_norm_eps: 1.0e-5
 encoder_layers: 4
 decoder_layers: 4
+
+# tokenization
 max_len: 128
+vocab_size: 58102
 
 # data params
 truncate: 16

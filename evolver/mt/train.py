@@ -11,11 +11,13 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from .data import WMT, EvolverWMT
+from .data import WMT, EvolverWMT, MarianTokenizer
 from .models import Transformer, Evolver, Teacher
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+tokenizer = MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-de')
 
 def log_to_wandb(data, step=None):
     if wandb.run is not None: wandb.log(data, step=step)
@@ -95,9 +97,12 @@ def init_model(config):
         'layer_norm_eps': config['layer_norm_eps'],
         'decoder_layers': config['decoder_layers'],
         'encoder_layers': config['encoder_layers'],
-        'vocab_size': config['vocab_size'],
         'max_len': config['max_len'],
-        'name': config['name']
+        'name': config['name'],
+        'bos_token_id': tokenizer.bos_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+        'pad_token_id': tokenizer.pad_token_id,
+        'vocab_size': tokenizer.vocab_size+1, # add one for special bos
     }
     
     if config['model_type'] == 'decoder_only':
@@ -120,7 +125,7 @@ def load_checkpoint(model, optimizer, config):
 def train(config):
     device = torch.device(config['device'])
     
-    dataset = WMT if config['model_type'] == 'decoder_only' else WMTForEvolver
+    dataset = WMT if config['model_type'] == 'decoder_only' else EvolverWMT
     train_dataset = dataset(split='train', max_len=config['max_len'], truncate=config.get('truncate'))
     eval_dataset = dataset(split='validation', max_len=config['max_len'], truncate=config.get('truncate'))
     logger.info('loaded datasets!')
@@ -132,15 +137,16 @@ def train(config):
     model = init_model(config)
     optim = AdamW(model.parameters(), lr=config['lr'])
     step = load_checkpoint(model, optim, config)
+    logger.info('loaded model!')
     
     if not config['skip']:
-        logger.info('eval sanity check')
+        logger.info('starting eval sanity check...')
         evaluate(model, eval_loader, device, 1)
         logger.info('sanity check passed')
     
     model.train()
     for _ in range(config['train_epochs']):
-        for batch in tqdm(train_loader):
+        for batch in tqdm(train_loader, disable=config['local']):
             if step >= config['train_steps']: break
             
             loss = train_step(model, batch, device, step=step)

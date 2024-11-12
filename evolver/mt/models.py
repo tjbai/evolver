@@ -53,6 +53,11 @@ class Evolver(nn.Module):
             bias=True,
             add_bias_kv=False,
             add_zero_attn=False)
+        
+    def embed(self, x):
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
+        x = self.positional_embedding(x, d=1)
+        return x
     
     def forward(self, batch, cache=None):
         src_ids = batch['src_ids']

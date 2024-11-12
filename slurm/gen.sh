@@ -7,7 +7,7 @@ fi
 
 config_path="$1"
 model_file="$2"
-job_name=$(basename "$config_path" .json)
+job_name=$(basename "$config_path" .yml)
 
 cat << EOF > "slurm/${job_name}.sh"
 #!/bin/bash

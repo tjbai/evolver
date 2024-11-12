@@ -22,7 +22,7 @@ cat << EOF > "slurm/${job_name}.sh"
 
 ml anaconda
 conda activate evo
-python3 $model_file --config $config_path --device cuda
+python3 -m $model_file --config $config_path --device cuda
 EOF
 
 echo "generated: ${job_name}.sh"

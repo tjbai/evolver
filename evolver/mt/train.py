@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from .data import WMT, EvolverWMT, MarianTokenizer
+from .data import WMT, EvolverLoader, MarianTokenizer
 from .models import Transformer, Evolver, Teacher
 
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ def log_to_wandb(data, step=None):
 def save_checkpoint(model, optimizer, step, config):
     save_path = os.path.join(config['checkpoint_dir'], f'{model.name}_{step}.pt')
     torch.save({'step': step, 'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, save_path)
-    
+
 def train_step(model, batch, device, step=None):
     if isinstance(model, Transformer):
         return model.step({k: v.to(device) for k, v in batch.items()})
@@ -49,23 +49,23 @@ def train_step(model, batch, device, step=None):
 @torch.no_grad()
 def evaluate(model, eval_loader, device, num_eval_steps):
     model.eval()
-    
+
     tot_loss = 0
     hyps = []
     refs = []
-    
+
     for i, batch in enumerate(tqdm(eval_loader, desc="eval...", total=num_eval_steps)):
         if i >= num_eval_steps: break
-        
+
         if isinstance(model, Transformer):
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
             generated = model.generate(batch['src_ids'].to(device))
-            
+
         else:
             loss = train_step(model, batch, device)
             tot_loss += loss.item()
-        
+
         # TODO -- bring back sampling to test
         #     traj = model.rollout({
         #         'src_ids': batch['src_ids'].to(device),
@@ -73,21 +73,21 @@ def evaluate(model, eval_loader, device, num_eval_steps):
         #         'tgt_ids': batch['tgt_ids'].to(device),
         #         'edit_ids': tuple(map(lambda x: x.to(device), batch['edit_ids']))})
         #     *_, generated = traj
-        
+
         # for hyp, ref in zip(generated, batch['tgt_ids']):
         #     hyp_text = tokenizer.decode(hyp)
         #     ref_text = tokenizer.decode(ref)
         #     hyps.append(hyp_text)
         #     refs.append(ref_text)
-            
+
     # logger.info(f'sample hyp: {hyps[0]}')
     # logger.info(f'sample ref: {refs[0]}')
-    
+
     # score = corpus_bleu(hyps, [refs]).score
     score = 0
 
     return tot_loss / num_eval_steps, score
-    
+
 def init_model(config):
     params = {
         'd_model': config['d_model'],
@@ -104,14 +104,14 @@ def init_model(config):
         'pad_token_id': tokenizer.pad_token_id,
         'vocab_size': tokenizer.vocab_size+1, # add one for special bos
     }
-    
+
     if config['model_type'] == 'decoder_only':
         return Transformer(**params).to(config['device'])
     elif config['model_type'] == 'evolver':
         return Evolver(**params).to(config['device'])
     else:
         return Teacher(**params).to(config['device'])
-    
+
 def load_checkpoint(model, optimizer, config):
     if config.get('from_checkpoint') is not None:
         checkpoint = torch.load(config['from_checkpoint'])
@@ -124,31 +124,34 @@ def load_checkpoint(model, optimizer, config):
 
 def train(config):
     device = torch.device(config['device'])
-    
-    dataset = WMT if config['model_type'] == 'decoder_only' else EvolverWMT
-    train_dataset = dataset(split='train', max_len=config['max_len'], truncate=config.get('truncate'))
-    eval_dataset = dataset(split='validation', max_len=config['max_len'], truncate=config.get('truncate'))
+
+    loader_kwargs = {'batch_size': config['batch_size'], 'num_workers': config['num_workers']}
+
+    if config['model_type'] == 'decoder_only':
+        train_dataset = WMT(split='train', max_len=config['max_len'], truncate=config.get('truncate'))
+        eval_dataset = WMT(split='validation', max_len=config['max_len'], truncate=config.get('truncate'))
+        train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), collate_fn=train_dataset.collate_fn, **loader_kwargs)
+        eval_loader = DataLoader(eval_dataset, collate_fn=eval_dataset.collate_fn, **loader_kwargs)
+    else:
+        train_loader = EvolverLoader(split='train', max_len=config['max_len'], truncate=config.get('truncate')).get_loader(**loader_kwargs)
+        eval_loader = EvolverLoader(split='validation', max_len=config['max_len'], truncate=config.get('truncate')).get_loader(**loader_kwargs)
     logger.info('loaded datasets!')
-    
-    kwargs = {'batch_size': config['batch_size'], 'collate_fn': train_dataset.collate_fn, 'num_workers': config['num_workers']}
-    train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), **kwargs)
-    eval_loader = DataLoader(eval_dataset, **kwargs)
-   
+
     model = init_model(config)
     optim = AdamW(model.parameters(), lr=config['lr'])
     step = load_checkpoint(model, optim, config)
     logger.info('loaded model!')
-    
+
     if not config['skip']:
         logger.info('starting eval sanity check...')
         evaluate(model, eval_loader, device, 1)
         logger.info('sanity check passed')
-    
+
     model.train()
     for _ in range(config['train_epochs']):
         for batch in tqdm(train_loader, disable=config['local']):
             if step >= config['train_steps']: break
-            
+
             loss = train_step(model, batch, device, step=step)
             loss.backward()
 
@@ -166,7 +169,7 @@ def train(config):
 
             if (step + 1) % config['save_every'] == 0:
                 save_checkpoint(model, optim, step, config)
-            
+
             step += 1
 
     eval_loss, bleu_score = evaluate(model, eval_loader, device, config['num_eval_steps'])

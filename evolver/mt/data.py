@@ -1,11 +1,17 @@
 import re
 import random
+import logging
+
 import torch
 import spacy
+
 from transformers import MarianTokenizer as Marian
 from datasets import load_dataset
 from collections import defaultdict
 from torch.utils.data import Dataset
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
     
 def pad(seqs, padding_value, max_len=int(1e10)):
     return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=padding_value)[:, :max_len]
@@ -25,8 +31,10 @@ class Parser:
                 s = i
                 i = text.find(token, i) + len(token)
                 spans.append((s, i))
+                
+        if len(spans) != len(tokens):
+            raise Exception(f'number of spans does not match number of tokens for: {text}')
         
-        assert len(spans) == len(tokens), f'number of spans does not match number of tokens for: {text}'
         return spans
 
     def get_alignment(self, text, spacy_tokens, marian_tokens, spacy_spans=None, marian_spans=None):
@@ -47,8 +55,10 @@ class Parser:
         for i, tok in enumerate(marian_tokens):
             if tok == '': alignment[i] = alignment[i+1] # word break
             if tok == '<unk>': alignment[i] = 1 + alignment[i-1] # unk
-        
-        assert len(alignment) == len(marian_tokens), f'did not find a complete alignment for: {text}'
+            
+        if len(alignment) != len(marian_tokens):
+            raise Exception(f'could not find a complete alignment for {text}')
+
         return alignment
 
     def get_spacy_tokens(self, text):
@@ -63,51 +73,55 @@ class Parser:
         return re.sub(f'[{pattern}]', '"', text)
     
     def parse(self, text):
-        text = self.clean_text(text) 
+        try:
+            text = self.clean_text(text) 
+            
+            spacy_tokens = self.get_spacy_tokens(text)
+            spacy_spans = self.get_spans(text, spacy_tokens)
+            normalized_marian_tokens = self.get_marian_tokens(text)
+            marian_spans = self.get_spans(text, normalized_marian_tokens)
+
+            raw_marian_tokens = self.marian.tokenize(text)
+            doc = self.nlp(text)
+            alignment = self.get_alignment(text, spacy_tokens, normalized_marian_tokens, spacy_spans, marian_spans)
         
-        spacy_tokens = self.get_spacy_tokens(text)
-        spacy_spans = self.get_spans(text, spacy_tokens)
-        normalized_marian_tokens = self.get_marian_tokens(text)
-        marian_spans = self.get_spans(text, normalized_marian_tokens)
+            # reverse map spacy to marian tokens
+            reverse = defaultdict(list)
+            for k, v in alignment.items(): reverse[v].append(k)
 
-        raw_marian_tokens = self.marian.tokenize(text)
-        doc = self.nlp(text)
-        alignment = self.get_alignment(text, spacy_tokens, normalized_marian_tokens, spacy_spans, marian_spans)
-    
-        # reverse map spacy to marian tokens
-        reverse = defaultdict(list)
-        for k, v in alignment.items(): reverse[v].append(k)
+            # get original root idx
+            root_i = next(i for i, tok in enumerate(doc) if tok.head == tok)
 
-        # get original root idx
-        root_i = next(i for i, tok in enumerate(doc) if tok.head == tok)
+            seq = []
+            for i, text in enumerate(raw_marian_tokens):
+                spacy_tok = doc[alignment[i]]
+                seq.append({'text': text, 'pos': spacy_tok.pos_, 'i': i, 'is_head': alignment[i] == root_i})
+                
+            for i, _ in enumerate(seq):
+                spacy_children = doc[alignment[i]].children
+                seq[i]['children'] = []
+                for child in spacy_children:
+                    seq[i]['children'].extend(seq[i] for i in reverse[child.i])
+                
+                '''
+                we use a weak heuristic to determine the lineage if the parent is broken up into several tokens.
 
-        seq = []
-        for i, text in enumerate(raw_marian_tokens):
-            spacy_tok = doc[alignment[i]]
-            seq.append({'text': text, 'pos': spacy_tok.pos_, 'i': i, 'is_head': alignment[i] == root_i})
-            
-        for i, _ in enumerate(seq):
-            spacy_children = doc[alignment[i]].children
-            seq[i]['children'] = []
-            for child in spacy_children:
-                seq[i]['children'].extend(seq[i] for i in reverse[child.i])
-            
-            '''
-            we use a weak heuristic to determine the lineage if the parent is broken up into several tokens.
+                we also encounter a funny edge case here with percentage signs, e.g. 11%
+                spacy will tokenize this into 11%, where 11 <- %
+                marian will tokenize this into 1 and 1%, essentially blending generations
 
-            we also encounter a funny edge case here with percentage signs, e.g. 11%
-            spacy will tokenize this into 11%, where 11 <- %
-            marian will tokenize this into 1 and 1%, essentially blending generations
-
-            jank solution: if the parent is empty then just go one level deeper
-            '''
-            spacy_par = doc[alignment[i]].head
-            while len(reverse[spacy_par.i]) == 0:
-                spacy_par = spacy_par.head
-            par = reverse[spacy_par.i][0]
-            seq[i]['par'] = par
-            
-        return seq
+                jank solution: if the parent is empty then just go one level deeper
+                '''
+                spacy_par = doc[alignment[i]].head
+                while len(reverse[spacy_par.i]) == 0:
+                    spacy_par = spacy_par.head
+                par = reverse[spacy_par.i][0]
+                seq[i]['par'] = par
+                
+            return seq
+        
+        except Exception:
+            return None
 
 class MarianTokenizer(Marian):
     
@@ -157,11 +171,25 @@ class WMT(Dataset):
         tgt_ids = pad([torch.tensor(ids) for ids in tgt_ids], self.pad_token_id)
         return {'src_ids': src_ids, 'tgt_ids': tgt_ids}
     
+def can_align(x, parser=None):
+    return parser.parse(x['translation']['en']) is not None
+    
 class EvolverWMT(WMT):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.parser = Parser()
+
+        # this works but might be slow (but worth it)
+        logger.info(f'starting dataset size: {len(self.dataset)}')
+        self.dataset = self.dataset.filter(
+            function=can_align,
+            fn_kwargs={'parser': self.parser},
+            num_proc=8,
+            cache_file_name='/scratch4/jeisner1/cache/wmt_alignments',
+            load_from_cache_file=True
+        )
+        logger.info(f'after filtering err cases: {len(self.dataset)}')
     
     def _get_depth(self, doc):
         root = next(tok for tok in doc if tok['is_head'])

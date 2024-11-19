@@ -1,3 +1,4 @@
+import re
 import random
 import torch
 import spacy
@@ -56,7 +57,14 @@ class Parser:
     def get_marian_tokens(self, text):
         return [self.marian.decode(id) for id in self.marian(text)['input_ids'][1:-1]]
     
+    def clean_text(self, text):
+        exclude = [8220, 8221, 8216, 8217] # escape quotes
+        pattern = '|'.join(chr(ord) for ord in exclude)
+        return re.sub(f'[{pattern}]', '"', text)
+    
     def parse(self, text):
+        text = self.clean_text(text) 
+        
         spacy_tokens = self.get_spacy_tokens(text)
         spacy_spans = self.get_spans(text, spacy_tokens)
         normalized_marian_tokens = self.get_marian_tokens(text)
